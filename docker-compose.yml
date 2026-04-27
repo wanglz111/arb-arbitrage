@@ -1,3 +1,4 @@
+# Set SCANNER_IMAGE in .env to an immutable GHCR sha tag or digest for reproducible deploys.
 services:
   scanner:
     image: ${SCANNER_IMAGE:-ghcr.io/wanglz111/arb-arbitrage:latest}

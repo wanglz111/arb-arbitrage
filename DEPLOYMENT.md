@@ -1,6 +1,7 @@
 # Deployment
 
-This repository is set up to build a scanner image on GitHub Actions and publish it to GHCR.
+This repository is set up to build a scanner image on GitHub Actions, smoke-test
+it, and publish it to GHCR.
 
 ## Build Flow
 
@@ -8,14 +9,35 @@ This repository is set up to build a scanner image on GitHub Actions and publish
 - GitHub Actions runs:
   - `cargo clippy --manifest-path scanner/Cargo.toml -- -D warnings`
   - `cargo test --manifest-path scanner/Cargo.toml`
-  - multi-arch Docker build
-  - push to `ghcr.io/<owner>/<repo>:latest`
+  - a container smoke test that verifies the scanner starts and stays alive
+  - Docker build and push to GHCR
+- Published image refs include:
+  - `ghcr.io/<owner>/<repo>:latest` on the default branch
+  - `ghcr.io/<owner>/<repo>:<branch>`
+  - `ghcr.io/<owner>/<repo>:sha-<full-commit-sha>`
+- Each successful non-PR run also publishes:
+  - a workflow summary with the exact immutable tag and digest
+  - a `scanner-image.env` artifact containing ready-to-copy `SCANNER_IMAGE=...` values
 
 ## Server Setup
 
 1. Copy `.env.example` to `.env`.
 2. Fill in your RPC URLs and scanner env vars.
-3. `SCANNER_IMAGE` is optional. By default, `docker-compose.yml` uses `ghcr.io/wanglz111/arb-arbitrage:latest`.
+3. Set `SCANNER_IMAGE` in `.env` to the immutable tag or digest from the latest successful `docker-image` workflow.
+
+Example:
+
+```bash
+SCANNER_IMAGE=ghcr.io/wanglz111/arb-arbitrage:sha-<full-commit-sha>
+```
+
+or
+
+```bash
+SCANNER_IMAGE=ghcr.io/wanglz111/arb-arbitrage@sha256:<image-digest>
+```
+
+If `SCANNER_IMAGE` is omitted, `docker-compose.yml` falls back to `ghcr.io/wanglz111/arb-arbitrage:latest`, which is convenient for ad hoc use but not ideal for production rollouts.
 4. If the repository or package is private, run:
 
 ```bash
@@ -30,7 +52,20 @@ Use a GitHub token with at least `read:packages`.
 docker compose up -d
 ```
 
-Because `docker-compose.yml` uses `pull_policy: always`, re-running `docker compose up -d` will refresh the image before restart.
+Because `docker-compose.yml` uses `pull_policy: always`, re-running `docker compose up -d` will refresh the configured image before restart.
+
+## Recommended Rollout Flow
+
+1. Push the scanner change to `main` or `master`.
+2. Wait for the `docker-image` workflow to succeed.
+3. Copy the immutable `SCANNER_IMAGE=...` value from the workflow summary or `scanner-image.env` artifact into the server `.env`.
+4. Run `docker compose up -d`.
+5. Verify the container image and startup logs:
+
+```bash
+docker ps -a
+docker compose logs --tail=50 scanner
+```
 
 ## Notes
 

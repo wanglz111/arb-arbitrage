@@ -378,10 +378,19 @@ impl<'a> CandidateProcessor<'a> {
     }
 }
 
+#[derive(Debug)]
+struct BuildMetadata {
+    version: &'static str,
+    git_sha: String,
+    git_ref: String,
+    created_at: String,
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     init_tracing();
     load_env_file();
+    let build_metadata = build_metadata();
 
     let config = ScannerConfig::from_env()?;
     let token_map = config.token_map();
@@ -432,6 +441,10 @@ async fn main() -> Result<()> {
         debug_summary_enabled = config.debug_summary_enabled,
         debug_summary_interval_secs = config.debug_summary_interval.as_secs(),
         tracked_reserve_hint_usd = format!("{tracked_reserve_hint_usd:.0}"),
+        scanner_version = build_metadata.version,
+        image_git_sha = build_metadata.git_sha.as_str(),
+        image_git_ref = build_metadata.git_ref.as_str(),
+        image_created_at = build_metadata.created_at.as_str(),
         "scanner starting"
     );
 
@@ -557,6 +570,22 @@ fn init_tracing() {
         .unwrap_or_else(|_| "scanner=info".into());
 
     tracing_subscriber::fmt().with_env_filter(filter).init();
+}
+
+fn build_metadata() -> BuildMetadata {
+    BuildMetadata {
+        version: env!("CARGO_PKG_VERSION"),
+        git_sha: read_build_env("SCANNER_BUILD_GIT_SHA"),
+        git_ref: read_build_env("SCANNER_BUILD_GIT_REF"),
+        created_at: read_build_env("SCANNER_BUILD_CREATED"),
+    }
+}
+
+fn read_build_env(key: &str) -> String {
+    std::env::var(key)
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| "unknown".to_string())
 }
 
 async fn recv_live_event(

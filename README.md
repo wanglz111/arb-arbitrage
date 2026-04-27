@@ -77,15 +77,20 @@ Useful overrides:
 The repo includes:
 
 - a Dockerfile for the Rust scanner
-- a GitHub Actions workflow that builds and pushes a GHCR image
+- a GitHub Actions workflow that smoke-tests the image, then pushes GHCR tags including `latest` and immutable `sha-<commit>` refs
 - a `docker-compose.yml` that runs the scanner from a server-side `.env`
 
 Typical server flow:
 
 ```bash
 cp .env.example .env
+# set SCANNER_IMAGE=ghcr.io/<owner>/<repo>:sha-<full-commit-sha>
 docker compose up -d
 ```
+
+For reproducible deploys, copy the immutable `SCANNER_IMAGE=...` value from the
+`docker-image` workflow summary or `scanner-image.env` artifact instead of
+relying on `:latest`.
 
 More details are in [DEPLOYMENT.md](/Users/edy/lucas/arb-arbitrage/DEPLOYMENT.md).
 

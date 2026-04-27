@@ -20,9 +20,19 @@ on:
       - "scanner/**"
   workflow_dispatch:
 
+concurrency:
+  group: docker-image-${{ github.ref }}
+  cancel-in-progress: true
+
 permissions:
   contents: read
   packages: write
+
+env:
+  IMAGE_NAME: ghcr.io/${{ github.repository }}
+  IMAGE_SHA_TAG: sha-${{ github.sha }}
+  BUILD_REF: ${{ github.ref_name }}
+  BUILD_CREATED: ${{ github.event.head_commit.timestamp || github.event.pull_request.updated_at || 'unknown' }}
 
 jobs:
   build-and-push:
@@ -47,6 +57,52 @@ jobs:
       - name: Test scanner
         run: cargo test --manifest-path scanner/Cargo.toml
 
+      - name: Extract image metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.IMAGE_NAME }}
+          tags: |
+            type=ref,event=branch
+            type=raw,value=${{ env.IMAGE_SHA_TAG }}
+            type=raw,value=latest,enable={{is_default_branch}}
+
+      - name: Build smoke-test image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile
+          load: true
+          tags: arb-arbitrage:smoke
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          build-args: |
+            SCANNER_BUILD_GIT_SHA=${{ github.sha }}
+            SCANNER_BUILD_GIT_REF=${{ env.BUILD_REF }}
+            SCANNER_BUILD_CREATED=${{ env.BUILD_CREATED }}
+
+      - name: Smoke test scanner image
+        run: |
+          set -euo pipefail
+          log_file="$(mktemp)"
+          set +e
+          timeout 10s docker run --rm \
+            -e HTTP_RPC_URL=http://127.0.0.1:9 \
+            -e LOG_RPC_URL=http://127.0.0.1:9 \
+            -e QUOTE_RPC_URL=http://127.0.0.1:9 \
+            -e SCANNER_RPC_RETRY_MS=50 \
+            -e SCANNER_POLL_MS=500 \
+            arb-arbitrage:smoke >"$log_file" 2>&1
+          status=$?
+          set -e
+          if [ "$status" -ne 124 ]; then
+            cat "$log_file"
+            echo "scanner container exited unexpectedly during smoke test"
+            exit 1
+          fi
+          grep -q "scanner starting" "$log_file"
+          grep -q "failed to fetch latest block, retrying" "$log_file"
+
       - name: Login to GHCR
         if: github.event_name != 'pull_request'
         uses: docker/login-action@v3
@@ -55,24 +111,47 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Extract image metadata
-        id: meta
-        uses: docker/metadata-action@v5
-        with:
-          images: ghcr.io/${{ github.repository }}
-          tags: |
-            type=ref,event=branch
-            type=sha
-            type=raw,value=latest,enable={{is_default_branch}}
-
       - name: Build and push image
+        id: build-push
         uses: docker/build-push-action@v6
         with:
           context: .
           file: ./Dockerfile
           platforms: linux/amd64
           push: ${{ github.event_name != 'pull_request' }}
+          build-args: |
+            SCANNER_BUILD_GIT_SHA=${{ github.sha }}
+            SCANNER_BUILD_GIT_REF=${{ env.BUILD_REF }}
+            SCANNER_BUILD_CREATED=${{ env.BUILD_CREATED }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+      - name: Write deployment image refs
+        if: github.event_name != 'pull_request'
+        run: |
+          cat <<EOF > scanner-image.env
+          SCANNER_IMAGE=${{ env.IMAGE_NAME }}:${{ env.IMAGE_SHA_TAG }}
+          SCANNER_IMAGE_DIGEST=${{ env.IMAGE_NAME }}@${{ steps.build-push.outputs.digest }}
+          EOF
+
+      - name: Upload deployment image refs
+        if: github.event_name != 'pull_request'
+        uses: actions/upload-artifact@v4
+        with:
+          name: scanner-image-env
+          path: scanner-image.env
+
+      - name: Summarize published image
+        if: github.event_name != 'pull_request'
+        run: |
+          {
+            echo "## Scanner image"
+            echo
+            echo "- Immutable tag: \`${{ env.IMAGE_NAME }}:${{ env.IMAGE_SHA_TAG }}\`"
+            echo "- Immutable digest: \`${{ env.IMAGE_NAME }}@${{ steps.build-push.outputs.digest }}\`"
+            echo "- Mutable fallback: \`${{ env.IMAGE_NAME }}:latest\`"
+            echo
+            echo "Use the immutable tag or digest in the server \`.env\` as \`SCANNER_IMAGE=...\`."
+          } >> "$GITHUB_STEP_SUMMARY"
