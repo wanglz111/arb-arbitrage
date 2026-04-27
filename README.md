@@ -56,6 +56,23 @@ cargo test --manifest-path scanner/Cargo.toml
 forge test
 ```
 
+5. Optional: let `git push` run local checks first.
+
+```bash
+git config --local core.hooksPath .githooks
+```
+
+The bundled `pre-push` hook runs:
+
+- `cargo clippy --manifest-path scanner/Cargo.toml -- -D warnings`
+- `cargo test --manifest-path scanner/Cargo.toml`
+- `docker build --platform linux/amd64 -t arb-arbitrage:pre-push .`
+
+Useful overrides:
+
+- `SKIP_DOCKER_BUILD=1 git push`
+- `git push --no-verify`
+
 ## Deployment
 
 The repo includes:
