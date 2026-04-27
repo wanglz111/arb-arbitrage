@@ -14,8 +14,8 @@ This repository is set up to build a scanner image on GitHub Actions and publish
 ## Server Setup
 
 1. Copy `.env.example` to `.env`.
-2. Set `SCANNER_IMAGE=ghcr.io/<owner>/<repo>:latest`.
-3. Fill in your RPC URLs and scanner env vars.
+2. Fill in your RPC URLs and scanner env vars.
+3. `SCANNER_IMAGE` is optional. By default, `docker-compose.yml` uses `ghcr.io/wanglz111/arb-arbitrage:latest`.
 4. If the repository or package is private, run:
 
 ```bash
