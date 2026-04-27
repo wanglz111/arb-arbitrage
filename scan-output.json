@@ -1,0 +1,454 @@
+{
+  "latestBlock": 456762564,
+  "totalPools": 25737,
+  "feeCounts": {
+    "100": 2539,
+    "500": 2020,
+    "3000": 7120,
+    "10000": 14058
+  },
+  "topPoolsByReserve": [
+    {
+      "address": "0xc6962004f452be9203591991d15f6b388e09e8d0",
+      "name": "USDC / WETH 0.05%",
+      "reserveUsd": 56476113.408,
+      "volume24h": 54573528.6185549,
+      "createdAt": "2023-06-08T21:28:24Z",
+      "baseSymbol": "USDC",
+      "quoteSymbol": "WETH",
+      "baseAddress": "0xaf88d065e77c8cc2239327c5edb3a432268e5831",
+      "quoteAddress": "0x82af49447d8a07e3bd95bd0d56f35241523fbab1",
+      "fee": 500
+    },
+    {
+      "address": "0x2f5e87c9312fa29aed5c179e456625d79015299c",
+      "name": "WBTC / WETH 0.05%",
+      "reserveUsd": 49365684.6314,
+      "volume24h": 23071213.465717,
+      "createdAt": "2022-02-07T15:13:14Z",
+      "baseSymbol": "WBTC",
+      "quoteSymbol": "WETH",
+      "baseAddress": "0x2f2a2543b76a4166549f7aab2e75bef0aefc5b0f",
+      "quoteAddress": "0x82af49447d8a07e3bd95bd0d56f35241523fbab1",
+      "fee": 500
+    },
+    {
+      "address": "0x5969efdde3cf5c0d9a88ae51e47d721096a97203",
+      "name": "WBTC / USDT 0.05%",
+      "reserveUsd": 13039186.2682,
+      "volume24h": 9980401.12757659,
+      "createdAt": "2022-09-17T07:00:12Z",
+      "baseSymbol": "WBTC",
+      "quoteSymbol": "USDT",
+      "baseAddress": "0x2f2a2543b76a4166549f7aab2e75bef0aefc5b0f",
+      "quoteAddress": "0xfd086bc7cd5c481dcc9c85ebe478a1c0b69fcbb9",
+      "fee": 500
+    },
+    {
+      "address": "0x641c00a822e8b671738d32a431a4fb6074e5c79d",
+      "name": "WETH / USDT 0.05%",
+      "reserveUsd": 12571140.2619,
+      "volume24h": 9221869.31464598,
+      "createdAt": "2022-02-07T15:10:40Z",
+      "baseSymbol": "WETH",
+      "quoteSymbol": "USDT",
+      "baseAddress": "0x82af49447d8a07e3bd95bd0d56f35241523fbab1",
+      "quoteAddress": "0xfd086bc7cd5c481dcc9c85ebe478a1c0b69fcbb9",
+      "fee": 500
+    },
+    {
+      "address": "0x0e4831319a50228b9e450861297ab92dee15b44f",
+      "name": "USDC / WBTC 0.05%",
+      "reserveUsd": 8730801.6906,
+      "volume24h": 5991160.29509968,
+      "createdAt": "2023-06-28T12:07:23Z",
+      "baseSymbol": "USDC",
+      "quoteSymbol": "WBTC",
+      "baseAddress": "0xaf88d065e77c8cc2239327c5edb3a432268e5831",
+      "quoteAddress": "0x2f2a2543b76a4166549f7aab2e75bef0aefc5b0f",
+      "fee": 500
+    },
+    {
+      "address": "0xc473e2aee3441bf9240be85eb122abb059a3b57c",
+      "name": "USDC / WETH 0.3%",
+      "reserveUsd": 7958999.5658,
+      "volume24h": 813317.82517963,
+      "createdAt": "2023-06-08T21:27:50Z",
+      "baseSymbol": "USDC",
+      "quoteSymbol": "WETH",
+      "baseAddress": "0xaf88d065e77c8cc2239327c5edb3a432268e5831",
+      "quoteAddress": "0x82af49447d8a07e3bd95bd0d56f35241523fbab1",
+      "fee": 3000
+    },
+    {
+      "address": "0x42a4755709dd1bbfe959b3dea7200d4cb4f357d1",
+      "name": "EVA / WBTC 1%",
+      "reserveUsd": 7762678.1351,
+      "volume24h": 39802.5668470174,
+      "createdAt": "2025-08-04T09:53:31Z",
+      "baseSymbol": "EVA",
+      "quoteSymbol": "WBTC",
+      "baseAddress": "0x45d9831d8751b2325f3dbf48db748723726e1c8c",
+      "quoteAddress": "0x2f2a2543b76a4166549f7aab2e75bef0aefc5b0f",
+      "fee": 10000
+    },
+    {
+      "address": "0x689c96ceab93f5e131631d225d75dea3fd37747e",
+      "name": "ARB / WBTC 0.3%",
+      "reserveUsd": 4235511.5683,
+      "volume24h": 472196.869545052,
+      "createdAt": "2023-03-23T23:04:12Z",
+      "baseSymbol": "ARB",
+      "quoteSymbol": "WBTC",
+      "baseAddress": "0x912ce59144191c1204e64559fe8253a0e49e6548",
+      "quoteAddress": "0x2f2a2543b76a4166549f7aab2e75bef0aefc5b0f",
+      "fee": 3000
+    },
+    {
+      "address": "0xd13040d4fe917ee704158cfcb3338dcd2838b245",
+      "name": "RAIN / WETH 0.01%",
+      "reserveUsd": 3108449.7095,
+      "volume24h": 2957889.44270383,
+      "createdAt": "2025-10-19T14:00:25Z",
+      "baseSymbol": "RAIN",
+      "quoteSymbol": "WETH",
+      "baseAddress": "0x25118290e6a5f4139381d072181157035864099d",
+      "quoteAddress": "0x82af49447d8a07e3bd95bd0d56f35241523fbab1",
+      "fee": 100
+    },
+    {
+      "address": "0xbe3ad6a5669dc0b8b12febc03608860c31e2eef6",
+      "name": "USDC / USDT 0.01%",
+      "reserveUsd": 2561040.7281,
+      "volume24h": 897615.972667192,
+      "createdAt": "2023-06-09T06:51:09Z",
+      "baseSymbol": "USDC",
+      "quoteSymbol": "USDT",
+      "baseAddress": "0xaf88d065e77c8cc2239327c5edb3a432268e5831",
+      "quoteAddress": "0xfd086bc7cd5c481dcc9c85ebe478a1c0b69fcbb9",
+      "fee": 100
+    },
+    {
+      "address": "0x80a9ae39310abf666a87c743d6ebbd0e8c42158e",
+      "name": "GMX / WETH 1%",
+      "reserveUsd": 2450582.4415,
+      "volume24h": 1389.5711899518,
+      "createdAt": "2022-02-07T15:10:34Z",
+      "baseSymbol": "GMX",
+      "quoteSymbol": "WETH",
+      "baseAddress": "0xfc5a1a6eb076a2c7ad06ed22c90d7e710e35ad0a",
+      "quoteAddress": "0x82af49447d8a07e3bd95bd0d56f35241523fbab1",
+      "fee": 10000
+    },
+    {
+      "address": "0x07f01058a37e2a0ba9e4f4aaf5009a792500f857",
+      "name": "aArbWETH / WETH 0.05%",
+      "reserveUsd": 2026728.993,
+      "volume24h": 2075044.53065937,
+      "createdAt": "2024-02-23T03:35:57Z",
+      "baseSymbol": "aArbWETH",
+      "quoteSymbol": "WETH",
+      "baseAddress": "0xe50fa9b3c56ffb159cb0fca61f5c9d750e8128c8",
+      "quoteAddress": "0x82af49447d8a07e3bd95bd0d56f35241523fbab1",
+      "fee": 500
+    },
+    {
+      "address": "0xc6f780497a95e246eb9449f5e4770916dcd6396a",
+      "name": "ARB / WETH 0.05%",
+      "reserveUsd": 1835160.8947,
+      "volume24h": 5611538.64670125,
+      "createdAt": "2023-03-17T01:49:14Z",
+      "baseSymbol": "ARB",
+      "quoteSymbol": "WETH",
+      "baseAddress": "0x912ce59144191c1204e64559fe8253a0e49e6548",
+      "quoteAddress": "0x82af49447d8a07e3bd95bd0d56f35241523fbab1",
+      "fee": 500
+    },
+    {
+      "address": "0xc31e54c7a869b9fcbecc14363cf510d1c41fa443",
+      "name": "WETH / USDC 0.05%",
+      "reserveUsd": 1389771.3623,
+      "volume24h": 344078.51441082,
+      "createdAt": "2022-02-07T15:10:59Z",
+      "baseSymbol": "WETH",
+      "quoteSymbol": "USDC",
+      "baseAddress": "0x82af49447d8a07e3bd95bd0d56f35241523fbab1",
+      "quoteAddress": "0xff970a61a04b1ca14834a43f5de4533ebddb5cc8",
+      "fee": 500
+    },
+    {
+      "address": "0xd8d4314f8755259f78ccc2a8902fd92fbba54877",
+      "name": "LON / USDC 0.3%",
+      "reserveUsd": 1356328.0287,
+      "volume24h": 1704.4518624943,
+      "createdAt": "2025-01-07T16:23:29Z",
+      "baseSymbol": "LON",
+      "quoteSymbol": "USDC",
+      "baseAddress": "0x55678cd083fcdc2947a0df635c93c838c89454a3",
+      "quoteAddress": "0xaf88d065e77c8cc2239327c5edb3a432268e5831",
+      "fee": 3000
+    },
+    {
+      "address": "0x9b42809aaae8d088ee01fe637e948784730f0386",
+      "name": "cbBTC / WBTC 0.01%",
+      "reserveUsd": 1335954.2315,
+      "volume24h": 817317.839747497,
+      "createdAt": "2024-11-21T10:02:20Z",
+      "baseSymbol": "cbBTC",
+      "quoteSymbol": "WBTC",
+      "baseAddress": "0xcbb7c0000ab88b473b1f5afd9ef808440eed33bf",
+      "quoteAddress": "0x2f2a2543b76a4166549f7aab2e75bef0aefc5b0f",
+      "fee": 100
+    },
+    {
+      "address": "0xdf04fa6ee5e2dcf73f7edd0aa3a5f7f9a4a5f445",
+      "name": "CAPX / USDC 0.01%",
+      "reserveUsd": 1278152.0615,
+      "volume24h": 235545.547690959,
+      "createdAt": "2025-11-05T06:32:54Z",
+      "baseSymbol": "CAPX",
+      "quoteSymbol": "USDC",
+      "baseAddress": "0x97e66d3c4d5bcd7c64e3e55af28544c9addf9281",
+      "quoteAddress": "0xaf88d065e77c8cc2239327c5edb3a432268e5831",
+      "fee": 100
+    },
+    {
+      "address": "0x49340dbb8fb5ece2f9b594e77ab774e65725e9d8",
+      "name": "CHIP / USDC 0.01%",
+      "reserveUsd": 1181472.6056,
+      "volume24h": 1336667.09461628,
+      "createdAt": "2026-04-21T10:29:55Z",
+      "baseSymbol": "CHIP",
+      "quoteSymbol": "USDC",
+      "baseAddress": "0x0c1c1c109fe34733fca54b82d7b46b75cfb71f6e",
+      "quoteAddress": "0xaf88d065e77c8cc2239327c5edb3a432268e5831",
+      "fee": 100
+    },
+    {
+      "address": "0x149e36e72726e0bcea5c59d40df2c43f60f5a22d",
+      "name": "WBTC / WETH 0.3%",
+      "reserveUsd": 1181216.5971,
+      "volume24h": 68199.6063620267,
+      "createdAt": "2022-02-07T15:34:55Z",
+      "baseSymbol": "WBTC",
+      "quoteSymbol": "WETH",
+      "baseAddress": "0x2f2a2543b76a4166549f7aab2e75bef0aefc5b0f",
+      "quoteAddress": "0x82af49447d8a07e3bd95bd0d56f35241523fbab1",
+      "fee": 3000
+    },
+    {
+      "address": "0x468b88941e7cc0b88c1869d68ab6b570bcef62ff",
+      "name": "LINK / WETH 0.3%",
+      "reserveUsd": 1148009.9595,
+      "volume24h": 60215.9231655174,
+      "createdAt": "2022-02-07T15:54:01Z",
+      "baseSymbol": "LINK",
+      "quoteSymbol": "WETH",
+      "baseAddress": "0xf97f4df75117a78c1a5a0dbb814af92458539fb4",
+      "quoteAddress": "0x82af49447d8a07e3bd95bd0d56f35241523fbab1",
+      "fee": 3000
+    },
+    {
+      "address": "0xe5cf22ee4988d54141b77050967e1052bd9c7f7a",
+      "name": "MOR / WETH 0.3%",
+      "reserveUsd": 1009033.3348,
+      "volume24h": 13167.200384607,
+      "createdAt": "2024-05-08T12:10:24Z",
+      "baseSymbol": "MOR",
+      "quoteSymbol": "WETH",
+      "baseAddress": "0x092baadb7def4c3981454dd9c0a0d7ff07bcfc86",
+      "quoteAddress": "0x82af49447d8a07e3bd95bd0d56f35241523fbab1",
+      "fee": 3000
+    },
+    {
+      "address": "0xdbaeb7f0dfe3a0aafd798ccecb5b22e708f7852c",
+      "name": "PENDLE / WETH 0.3%",
+      "reserveUsd": 932322.2089,
+      "volume24h": 263422.331259358,
+      "createdAt": "2023-03-08T09:19:01Z",
+      "baseSymbol": "PENDLE",
+      "quoteSymbol": "WETH",
+      "baseAddress": "0x0c880f6761f1af8d9aa9c466984b80dab9a8c9e8",
+      "quoteAddress": "0x82af49447d8a07e3bd95bd0d56f35241523fbab1",
+      "fee": 3000
+    },
+    {
+      "address": "0x14af1804dbbf7d621ecc2901eef292a24a0260ea",
+      "name": "CRYPTO / WETH 1%",
+      "reserveUsd": 791841.533,
+      "volume24h": 89.4215657447,
+      "createdAt": "2022-09-10T06:00:21Z",
+      "baseSymbol": "CRYPTO",
+      "quoteSymbol": "WETH",
+      "baseAddress": "0x9842989969687f7d249d01cae1d2ff6b7b6b6d35",
+      "quoteAddress": "0x82af49447d8a07e3bd95bd0d56f35241523fbab1",
+      "fee": 10000
+    },
+    {
+      "address": "0x35218a1cbac5bbc3e57fd9bd38219d37571b3537",
+      "name": "wstETH / WETH 0.01%",
+      "reserveUsd": 718746.685,
+      "volume24h": 942600.962073878,
+      "createdAt": "2023-02-25T00:34:14Z",
+      "baseSymbol": "wstETH",
+      "quoteSymbol": "WETH",
+      "baseAddress": "0x5979d7b546e38e414f7e9822514be443a4800529",
+      "quoteAddress": "0x82af49447d8a07e3bd95bd0d56f35241523fbab1",
+      "fee": 100
+    },
+    {
+      "address": "0xaebdca1bc8d89177ebe2308d62af5e74885dccc3",
+      "name": "ARB / USDC 0.3%",
+      "reserveUsd": 710265.2715,
+      "volume24h": 127560.267857342,
+      "createdAt": "2023-06-10T09:08:11Z",
+      "baseSymbol": "ARB",
+      "quoteSymbol": "USDC",
+      "baseAddress": "0x912ce59144191c1204e64559fe8253a0e49e6548",
+      "quoteAddress": "0xaf88d065e77c8cc2239327c5edb3a432268e5831",
+      "fee": 3000
+    }
+  ],
+  "topTokensByReservePresence": [
+    {
+      "address": "0x82af49447d8a07e3bd95bd0d56f35241523fbab1",
+      "symbol": "WETH",
+      "pools": 96,
+      "reserveUsd": 150335988.992,
+      "volume24h": 102389116.10419177
+    },
+    {
+      "address": "0x2f2a2543b76a4166549f7aab2e75bef0aefc5b0f",
+      "symbol": "WBTC",
+      "pools": 22,
+      "reserveUsd": 88307694.5503,
+      "volume24h": 40629873.87300561
+    },
+    {
+      "address": "0xaf88d065e77c8cc2239327c5edb3a432268e5831",
+      "symbol": "USDC",
+      "pools": 54,
+      "reserveUsd": 85470511.0965,
+      "volume24h": 65520764.634596534
+    },
+    {
+      "address": "0xfd086bc7cd5c481dcc9c85ebe478a1c0b69fcbb9",
+      "symbol": "USDT",
+      "pools": 36,
+      "reserveUsd": 30822349.468500007,
+      "volume24h": 20799651.989438076
+    },
+    {
+      "address": "0x45d9831d8751b2325f3dbf48db748723726e1c8c",
+      "symbol": "EVA",
+      "pools": 2,
+      "reserveUsd": 7865933.359999999,
+      "volume24h": 46245.683846868
+    },
+    {
+      "address": "0x912ce59144191c1204e64559fe8253a0e49e6548",
+      "symbol": "ARB",
+      "pools": 15,
+      "reserveUsd": 7623982.520700001,
+      "volume24h": 6407533.168178021
+    },
+    {
+      "address": "0x25118290e6a5f4139381d072181157035864099d",
+      "symbol": "RAIN",
+      "pools": 3,
+      "reserveUsd": 3187664.3275999995,
+      "volume24h": 3820244.0622213273
+    },
+    {
+      "address": "0xfc5a1a6eb076a2c7ad06ed22c90d7e710e35ad0a",
+      "symbol": "GMX",
+      "pools": 4,
+      "reserveUsd": 2832959.1720000003,
+      "volume24h": 121652.4920183271
+    },
+    {
+      "address": "0xff970a61a04b1ca14834a43f5de4533ebddb5cc8",
+      "symbol": "USDC",
+      "pools": 11,
+      "reserveUsd": 2443428.122,
+      "volume24h": 598765.111910631
+    },
+    {
+      "address": "0xe50fa9b3c56ffb159cb0fca61f5c9d750e8128c8",
+      "symbol": "aArbWETH",
+      "pools": 2,
+      "reserveUsd": 2235252.8081,
+      "volume24h": 2103932.3436125647
+    },
+    {
+      "address": "0xf97f4df75117a78c1a5a0dbb814af92458539fb4",
+      "symbol": "LINK",
+      "pools": 7,
+      "reserveUsd": 1800610.8968,
+      "volume24h": 224549.62232104648
+    },
+    {
+      "address": "0x0c880f6761f1af8d9aa9c466984b80dab9a8c9e8",
+      "symbol": "PENDLE",
+      "pools": 6,
+      "reserveUsd": 1578300.3216999995,
+      "volume24h": 595024.6508010754
+    },
+    {
+      "address": "0xcbb7c0000ab88b473b1f5afd9ef808440eed33bf",
+      "symbol": "cbBTC",
+      "pools": 3,
+      "reserveUsd": 1378374.9026,
+      "volume24h": 819881.2673374737
+    },
+    {
+      "address": "0x55678cd083fcdc2947a0df635c93c838c89454a3",
+      "symbol": "LON",
+      "pools": 1,
+      "reserveUsd": 1356328.0287,
+      "volume24h": 1704.4518624943
+    },
+    {
+      "address": "0x97e66d3c4d5bcd7c64e3e55af28544c9addf9281",
+      "symbol": "CAPX",
+      "pools": 1,
+      "reserveUsd": 1278152.0615,
+      "volume24h": 235545.547690959
+    },
+    {
+      "address": "0x0c1c1c109fe34733fca54b82d7b46b75cfb71f6e",
+      "symbol": "CHIP",
+      "pools": 4,
+      "reserveUsd": 1277980.8965999999,
+      "volume24h": 1731417.5535429285
+    },
+    {
+      "address": "0xaa6b1798a97505b36d9c4a3736c2aa48674aeb97",
+      "symbol": "JOSS",
+      "pools": 2,
+      "reserveUsd": 1222867.7644000002,
+      "volume24h": 820.1079964464
+    },
+    {
+      "address": "0x092baadb7def4c3981454dd9c0a0d7ff07bcfc86",
+      "symbol": "MOR",
+      "pools": 1,
+      "reserveUsd": 1009033.3348,
+      "volume24h": 13167.200384607
+    },
+    {
+      "address": "0x6c84a8f1c29108f47a79964b5fe888d4f4d0de40",
+      "symbol": "tBTC",
+      "pools": 3,
+      "reserveUsd": 939974.0682999999,
+      "volume24h": 73684.370745325
+    },
+    {
+      "address": "0x9842989969687f7d249d01cae1d2ff6b7b6b6d35",
+      "symbol": "CRYPTO",
+      "pools": 1,
+      "reserveUsd": 791841.533,
+      "volume24h": 89.4215657447
+    }
+  ]
+}

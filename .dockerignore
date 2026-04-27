@@ -1,0 +1,10 @@
+.git
+**/.git
+.env
+.env.*
+!.env.server.example
+
+cache
+out
+scanner/target
+
