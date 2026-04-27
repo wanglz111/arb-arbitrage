@@ -3,9 +3,7 @@ FROM rust:1.95-bookworm AS builder
 WORKDIR /app
 
 COPY scanner/Cargo.toml scanner/Cargo.lock ./scanner/
-RUN mkdir -p scanner/src && \
-    printf 'fn main() {}\n' > scanner/src/main.rs
-RUN cargo build --manifest-path scanner/Cargo.toml --release
+RUN cargo fetch --manifest-path scanner/Cargo.toml
 
 COPY scanner ./scanner
 RUN cargo build --manifest-path scanner/Cargo.toml --release

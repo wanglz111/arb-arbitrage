@@ -10,19 +10,5 @@ RUSTUP_TOOLCHAIN="${RUSTUP_TOOLCHAIN:-stable}" cargo clippy --manifest-path scan
 echo "[pre-push] running scanner tests"
 RUSTUP_TOOLCHAIN="${RUSTUP_TOOLCHAIN:-stable}" cargo test --manifest-path scanner/Cargo.toml
 
-if [[ "${SKIP_DOCKER_BUILD:-0}" == "1" ]]; then
-  echo "[pre-push] skipping docker build because SKIP_DOCKER_BUILD=1"
-  exit 0
-fi
-
-if ! command -v docker >/dev/null 2>&1; then
-  echo "[pre-push] docker is not installed or not on PATH"
-  echo "[pre-push] install docker, or run with SKIP_DOCKER_BUILD=1 if you only want rust checks"
-  exit 1
-fi
-
-docker_tag="${DOCKER_BUILD_TAG:-arb-arbitrage:pre-push}"
-docker_platform="${DOCKER_BUILD_PLATFORM:-linux/amd64}"
-
-echo "[pre-push] building docker image ${docker_tag} for ${docker_platform}"
-docker build --platform "${docker_platform}" -t "${docker_tag}" .
+echo "[pre-push] local docker build/push is disabled"
+echo "[pre-push] image publishing is handled by the GitHub Actions amd64 workflow"

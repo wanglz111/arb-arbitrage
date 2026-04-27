@@ -66,11 +66,10 @@ The bundled `pre-push` hook runs:
 
 - `cargo clippy --manifest-path scanner/Cargo.toml -- -D warnings`
 - `cargo test --manifest-path scanner/Cargo.toml`
-- `docker build --platform linux/amd64 -t arb-arbitrage:pre-push .`
+- no local Docker build or push by default
 
 Useful overrides:
 
-- `SKIP_DOCKER_BUILD=1 git push`
 - `git push --no-verify`
 
 ## Deployment
