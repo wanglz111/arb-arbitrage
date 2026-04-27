@@ -7,6 +7,7 @@ ARG SCANNER_BUILD_CREATED=unknown
 WORKDIR /app
 
 COPY scanner/Cargo.toml scanner/Cargo.lock ./scanner/
+COPY scanner/src/main.rs ./scanner/src/main.rs
 RUN cargo fetch --manifest-path scanner/Cargo.toml
 
 COPY scanner ./scanner
