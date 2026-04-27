@@ -13,7 +13,7 @@ This repository is set up to build a scanner image on GitHub Actions and publish
 
 ## Server Setup
 
-1. Copy `.env.server.example` to `.env.server`.
+1. Copy `.env.example` to `.env`.
 2. Set `SCANNER_IMAGE=ghcr.io/<owner>/<repo>:latest`.
 3. Fill in your RPC URLs and scanner env vars.
 4. If the repository or package is private, run:
@@ -27,10 +27,10 @@ Use a GitHub token with at least `read:packages`.
 5. Start the scanner:
 
 ```bash
-docker compose --env-file .env.server up -d
+docker compose up -d
 ```
 
-Because `docker-compose.yml` uses `pull_policy: always`, re-running `docker compose --env-file .env.server up -d` will refresh the image before restart.
+Because `docker-compose.yml` uses `pull_policy: always`, re-running `docker compose up -d` will refresh the image before restart.
 
 ## Notes
 

@@ -2,9 +2,8 @@
 **/.git
 .env
 .env.*
-!.env.server.example
+!.env.example
 
 cache
 out
 scanner/target
-

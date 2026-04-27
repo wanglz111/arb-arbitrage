@@ -1,11 +1,11 @@
 services:
   scanner:
-    image: ${SCANNER_IMAGE:?set SCANNER_IMAGE in .env.server}
+    image: ${SCANNER_IMAGE:?set SCANNER_IMAGE in .env}
     container_name: arb-arbitrage-scanner
     restart: unless-stopped
     pull_policy: always
     env_file:
-      - .env.server
+      - .env
     logging:
       driver: json-file
       options:

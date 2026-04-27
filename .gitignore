@@ -1,7 +1,7 @@
 .DS_Store
 .env
 .env.*
-!.env.server.example
+!.env.example
 
 cache/
 out/
@@ -10,4 +10,3 @@ scanner/target/
 scanner/.git.codex-backup/
 
 node_modules/
-
