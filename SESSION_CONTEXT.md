@@ -646,3 +646,17 @@ After this execution-handoff pass, the most natural next build steps are:
   - validation:
     - `forge build`
     - `forge test --no-match-contract TriangleArbForkTest`
+- Switched the primary executor to Balancer Vault flash loans:
+  - `RouteArb` now implements `receiveFlashLoan(address[],uint256[],uint256[],bytes)`
+  - constructor first argument is now the Balancer Vault address
+  - external scanner calldata remains unchanged:
+    - `execute(uint256,uint256,bytes)`
+    - `executeRoute(uint256,uint256,uint256)`
+  - callback now repays `amount + fee` directly to the vault and transfers only remaining profit to `profitRecipient`
+  - route execution now only approves the Uniswap V3 router; no flash lender allowance is needed
+  - `TriangleArb` compatibility wrapper now forwards `balancerVault` into `RouteArb`
+  - added a local mock Balancer Vault / ERC20 / router unit test for the full flash-loan execution path
+- Validation completed for Balancer executor switch:
+  - `forge build`
+  - `forge test --match-contract RouteArbUnitTest`
+  - `forge test --no-match-contract TriangleArbForkTest`

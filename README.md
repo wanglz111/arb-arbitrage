@@ -8,7 +8,7 @@ This repo is focused on one concrete goal: detect narrow Uniswap v3 closed-route
 
 - discover 3-5 hop closed-route arbitrage opportunities on Arbitrum quickly
 - minimize long-running RPC and Alchemy quota usage
-- use Morpho flash loans as the preferred capital source
+- use Balancer Vault flash loans as the preferred execution capital source
 - prepare execution calldata fast enough for an eventual sub-`200ms` reaction path
 
 ## Current Status
