@@ -10,6 +10,7 @@ use crate::{
 
 const Q96_F64: f64 = 79_228_162_514_264_337_593_543_950_336.0;
 const LOCAL_REFINE_ROUNDS: usize = 2;
+const LOCAL_TERNARY_ROUNDS: usize = 12;
 const MAX_TICK_CROSSES_PER_LEG: usize = 256;
 
 #[derive(Clone, Debug)]
@@ -110,11 +111,114 @@ pub fn find_best_local_size(
         }
     }
 
+    let ternary_sample_count = run_ternary_size_search(
+        triangle,
+        state,
+        token_in.quote_amount_in,
+        &mut sampled_bps,
+        &mut sampled_amounts,
+        &mut best,
+    );
+    refinement_sample_count += ternary_sample_count;
+
     best.map(|mut quote| {
         quote.search_samples = coarse_sample_count + refinement_sample_count;
         quote.refinement_samples = refinement_sample_count;
         quote
     })
+}
+
+fn run_ternary_size_search(
+    triangle: &TrianglePath,
+    state: &ScannerState,
+    base_amount_in: u128,
+    sampled_bps: &mut Vec<u32>,
+    sampled_amounts: &mut BTreeSet<u128>,
+    best: &mut Option<LocalQuoteResult>,
+) -> usize {
+    let Some(best_size_bps) = best.as_ref().map(|quote| quote.size_bps) else {
+        return 0;
+    };
+    let Some((mut lower, mut upper)) = ternary_search_bounds(sampled_bps, best_size_bps) else {
+        return 0;
+    };
+
+    let mut search = TernarySizeSearch {
+        triangle,
+        state,
+        base_amount_in,
+        sampled_bps,
+        sampled_amounts,
+        best,
+        samples: 0,
+    };
+
+    for _ in 0..LOCAL_TERNARY_ROUNDS {
+        if upper <= lower + 2 {
+            break;
+        }
+
+        let span = upper - lower;
+        let left = lower + (span / 3);
+        let right = upper - (span / 3);
+        if left == right {
+            break;
+        }
+
+        let left_quote = search.sample_size_bps(left);
+        let right_quote = search.sample_size_bps(right);
+
+        let left_profit = left_quote
+            .as_ref()
+            .map(|quote| quote.gross_profit)
+            .unwrap_or(f64::NEG_INFINITY);
+        let right_profit = right_quote
+            .as_ref()
+            .map(|quote| quote.gross_profit)
+            .unwrap_or(f64::NEG_INFINITY);
+
+        if left_profit < right_profit {
+            lower = left;
+        } else {
+            upper = right;
+        }
+    }
+
+    search.samples
+}
+
+struct TernarySizeSearch<'a> {
+    triangle: &'a TrianglePath,
+    state: &'a ScannerState,
+    base_amount_in: u128,
+    sampled_bps: &'a mut Vec<u32>,
+    sampled_amounts: &'a mut BTreeSet<u128>,
+    best: &'a mut Option<LocalQuoteResult>,
+    samples: usize,
+}
+
+impl TernarySizeSearch<'_> {
+    fn sample_size_bps(&mut self, size_bps: u32) -> Option<LocalQuoteResult> {
+        insert_sorted_unique(self.sampled_bps, size_bps);
+
+        let amount_in_raw = scale_amount_in(self.base_amount_in, size_bps);
+        if amount_in_raw == 0 || !self.sampled_amounts.insert(amount_in_raw) {
+            return None;
+        }
+
+        self.samples += 1;
+        let candidate =
+            simulate_triangle_amount(self.triangle, self.state, amount_in_raw, size_bps)?;
+        if self
+            .best
+            .as_ref()
+            .map(|current| prefer_local_quote(&candidate, current))
+            .unwrap_or(true)
+        {
+            *self.best = Some(candidate.clone());
+        }
+        Some(candidate)
+    }
 }
 
 pub fn simulate_triangle_amount(
@@ -501,6 +605,23 @@ fn build_refinement_size_bps(sampled_bps: &[u32], best_size_bps: u32) -> Vec<u32
     normalize_size_bps(&refinement)
 }
 
+fn ternary_search_bounds(sampled_bps: &[u32], best_size_bps: u32) -> Option<(u32, u32)> {
+    let normalized = normalize_size_bps(sampled_bps);
+    let best_index = normalized
+        .iter()
+        .position(|value| *value == best_size_bps)?;
+    let lower = best_index
+        .checked_sub(1)
+        .and_then(|index| normalized.get(index).copied())
+        .unwrap_or_else(|| best_size_bps.saturating_div(2).max(1));
+    let upper = normalized
+        .get(best_index + 1)
+        .copied()
+        .unwrap_or_else(|| best_size_bps.saturating_mul(2));
+
+    (upper > lower + 2).then_some((lower, upper))
+}
+
 fn prefer_local_quote(candidate: &LocalQuoteResult, current: &LocalQuoteResult) -> bool {
     candidate
         .gross_profit
@@ -688,16 +809,17 @@ mod tests {
     }
 
     #[test]
-    fn best_size_search_refines_around_best_rung() {
+    fn best_size_search_runs_bounded_ternary_refinement() {
         let (triangle, token_map, state) = benchmark_fixture();
 
         let result = find_best_local_size(&triangle, &state, &token_map, &[2500, 5000, 10_000])
             .expect("best quote");
 
-        assert_eq!(result.size_bps, 625);
-        assert_eq!(result.amount_in_raw, 62_500_000);
-        assert_eq!(result.search_samples, 7);
-        assert_eq!(result.refinement_samples, 4);
+        assert_eq!(result.size_bps, 316);
+        assert_eq!(result.amount_in_raw, 31_600_000);
+        assert!(result.gross_profit.is_finite());
+        assert!(result.search_samples > 7);
+        assert!(result.refinement_samples > 4);
     }
 
     #[test]

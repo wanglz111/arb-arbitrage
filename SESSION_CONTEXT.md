@@ -582,3 +582,13 @@ After this execution-handoff pass, the most natural next build steps are:
   - the updated [test/TriangleArbFork.t.sol](/Users/edy/lucas/arb-arbitrage/test/TriangleArbFork.t.sol) compiles against the new executor ABI
   - a real fork smoke rerun was attempted, but this environment failed before execution because Foundry panicked while trying to use the configured RPC
   - so the post-refactor Solidity path is compile-verified but not yet re-smoke-tested against a live Arbitrum fork in this session
+- Added a bounded ternary-style local amount optimizer after the coarse ladder and neighbor refinement:
+  - the scanner still samples the configured coarse `SCANNER_LOCAL_SIZE_BPS` ladder first
+  - it then performs the existing neighbor refinement around the best rung
+  - it now additionally narrows the local size interval for 12 bounded iterations without spending RPC
+  - this better matches the intended `golden-section / ternary search` sizing step for mixed V3 paths
+  - the unit fixture moved from the old refined `625 bps` sample to a tighter `316 bps` sample
+- Validation completed for the bounded ternary sizing change:
+  - `cargo fmt --manifest-path scanner/Cargo.toml`
+  - `cargo test --manifest-path scanner/Cargo.toml`
+  - `cargo clippy --manifest-path scanner/Cargo.toml -- -D warnings`
