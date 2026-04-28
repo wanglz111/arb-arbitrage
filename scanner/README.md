@@ -1,6 +1,6 @@
 # Scanner
 
-Rust scanner skeleton for event-driven triangle arbitrage discovery on Arbitrum.
+Rust scanner skeleton for event-driven fixed-route arbitrage discovery on Arbitrum.
 
 ## Current Scope
 
@@ -11,15 +11,16 @@ This first version does:
 - subscribe to `Swap` / `Mint` / `Burn` logs over WebSocket when available
 - backfill `Swap` / `Mint` / `Burn` logs over HTTP for tracked pools
 - update in-memory pool state directly from decoded pool events
-- recompute only triangles affected by the changed pools
+- recompute only 3-5 hop closed routes affected by the changed pools
 - print a rough `edge_bps` score from current spot prices and pool fees
 - run multi-tick local simulation across loaded initialized ticks before spending exact quotes
 - search a small local `amountIn` ladder, then refine around the best rung before choosing a size
 - bootstrap initialized ticks around each active pool and apply live liquidityNet changes
 - optionally exact-quote a small shortlist through `QuoterV2`
 - limit exact quotes with per-block budget and per-ring dedupe
-- precompute per-triangle executor route templates for fast calldata construction after exact quote
+- precompute direct and route-id executor calldata templates for fast calldata construction after exact quote
 - generate executor calldata directly from local simulation when exact quote is disabled or skipped
+- write `data/route-catalog.jsonl` with `setRoute(...)` and sample `executeRoute(...)` calldata
 
 This version does not do:
 
@@ -33,6 +34,7 @@ This version does not do:
 - `USDT0`
 - `WETH`
 - `WBTC`
+- `cbBTC`
 - `ARB`
 
 ## Tracked Pools
@@ -167,10 +169,10 @@ RUST_LOG=scanner=info cargo run
 - [src/execute.rs](/Users/edy/lucas/arb-arbitrage/scanner/src/execute.rs): precomputed route templates plus fast executor calldata assembly
 - [src/quote.rs](/Users/edy/lucas/arb-arbitrage/scanner/src/quote.rs): exact quote path encoding and `QuoterV2` calls
 - [src/path.rs](/Users/edy/lucas/arb-arbitrage/scanner/src/path.rs): shared Uniswap v3 multihop path packing
-- [src/simulate.rs](/Users/edy/lucas/arb-arbitrage/scanner/src/simulate.rs): lightweight local swap simulation using nearest initialized tick bounds
+- [src/simulate.rs](/Users/edy/lucas/arb-arbitrage/scanner/src/simulate.rs): local multi-tick swap simulation across loaded initialized ticks
 - [src/state.rs](/Users/edy/lucas/arb-arbitrage/scanner/src/state.rs): on-chain state loading, tick spacing, and initialized tick boundary bootstrap
 - [src/watcher.rs](/Users/edy/lucas/arb-arbitrage/scanner/src/watcher.rs): tracked-pool HTTP backfill plus live WebSocket watcher
-- [src/graph.rs](/Users/edy/lucas/arb-arbitrage/scanner/src/graph.rs): triangle graph and affected-path rescoring
+- [src/graph.rs](/Users/edy/lucas/arb-arbitrage/scanner/src/graph.rs): 3-5 hop route graph and affected-path rescoring
 
 Candidate logs now also show:
 

@@ -19,7 +19,7 @@ use std::{
 use anyhow::{Context, Result};
 use dotenvy::from_path;
 use ethers::providers::{Http, Middleware, Provider};
-use ethers::types::{Address, U256};
+use ethers::types::{Address, Bytes, U256};
 use ethers::utils::hex;
 use serde_json::json;
 use tokio::sync::mpsc;
@@ -27,7 +27,7 @@ use tracing::{info, warn};
 
 use crate::{
     config::{ScannerConfig, TokenDef},
-    execute::{ExecutionBuilder, ExecutionPlan},
+    execute::{ExecutionBuilder, ExecutionPlan, RouteCatalogEntry},
     graph::TriangleGraph,
     quote::{ExactQuoteResult, QuoteEngine},
     simulate::LocalQuoteResult,
@@ -150,6 +150,7 @@ impl DirectionalJsonlWriter {
             })),
             "execution": execution_plan.map(|plan| json!({
                 "source": execution_source,
+                "route_id": plan.route_id.to_string(),
                 "loan_token": token_map
                     .get(&plan.loan_token)
                     .map(|token| token.symbol)
@@ -160,7 +161,9 @@ impl DirectionalJsonlWriter {
                 "slippage_bps": plan.slippage_bps,
                 "path_hex": format!("0x{}", hex::encode(plan.path.as_ref())),
                 "calldata": plan.calldata_hex(),
+                "route_calldata": plan.route_calldata_hex(),
                 "calldata_bytes": plan.execute_calldata.len(),
+                "route_calldata_bytes": plan.execute_route_calldata.len(),
             })),
         });
 
@@ -423,6 +426,13 @@ async fn main() -> Result<()> {
         None
     };
     let execution_builder = ExecutionBuilder::new(&graph.triangles, config.execution_slippage_bps)?;
+    write_route_catalog(
+        &config.route_catalog_path,
+        &graph.triangles,
+        &execution_builder,
+        &token_map,
+        &config.tokens,
+    )?;
     let processor = CandidateProcessor {
         config: &config,
         graph: &graph,
@@ -606,6 +616,101 @@ fn build_metadata() -> BuildMetadata {
     }
 }
 
+fn write_route_catalog(
+    path: &PathBuf,
+    triangles: &[graph::TrianglePath],
+    execution_builder: &ExecutionBuilder,
+    token_map: &HashMap<Address, TokenDef>,
+    tokens: &[TokenDef],
+) -> Result<()> {
+    if let Some(parent) = path.parent()
+        && !parent.as_os_str().is_empty()
+    {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("failed to create {}", parent.display()))?;
+    }
+
+    let entries = execution_builder.route_catalog(triangles)?;
+    let mut triangle_by_id = HashMap::new();
+    for triangle in triangles {
+        triangle_by_id.insert(triangle.id.as_str(), triangle);
+    }
+
+    let mut writer = BufWriter::new(
+        OpenOptions::new()
+            .create(true)
+            .truncate(true)
+            .write(true)
+            .open(path)
+            .with_context(|| format!("failed to open {}", path.display()))?,
+    );
+
+    for entry in entries {
+        let Some(triangle) = triangle_by_id.get(entry.label.as_str()) else {
+            continue;
+        };
+        write_route_catalog_entry(&mut writer, &entry, triangle, token_map, tokens)?;
+    }
+
+    writer.flush().context("failed to flush route catalog")?;
+    Ok(())
+}
+
+fn write_route_catalog_entry(
+    writer: &mut BufWriter<File>,
+    entry: &RouteCatalogEntry,
+    triangle: &graph::TrianglePath,
+    token_map: &HashMap<Address, TokenDef>,
+    tokens: &[TokenDef],
+) -> Result<()> {
+    let display = triangle.display_view(token_map);
+    let quote_amount_in = tokens
+        .iter()
+        .find(|token| token.address == triangle.start_token)
+        .map(|token| U256::from(token.quote_amount_in))
+        .unwrap_or_else(|| U256::from(1u64));
+    let sample_plan = ExecutionPlan {
+        route_id: entry.route_id,
+        loan_token: entry.loan_token,
+        amount_in: quote_amount_in,
+        expected_amount_out: quote_amount_in,
+        amount_out_minimum: quote_amount_in,
+        path: entry.path.clone(),
+        slippage_bps: 0,
+        execute_calldata: Bytes::new(),
+        execute_route_calldata: Bytes::new(),
+    };
+    let record = json!({
+        "route_id": entry.route_id.to_string(),
+        "label": display.label,
+        "fees": display.fee_label,
+        "loan_token": token_map
+            .get(&entry.loan_token)
+            .map(|token| token.symbol)
+            .unwrap_or("UNKNOWN"),
+        "path_hex": entry.path_hex(),
+        "set_route_calldata": entry.set_route_calldata_hex(),
+        "sample_amount_in": quote_amount_in.to_string(),
+        "sample_execute_route_calldata": build_sample_execute_route_calldata(&sample_plan),
+    });
+
+    serde_json::to_writer(&mut *writer, &record).context("failed to encode route catalog")?;
+    writer
+        .write_all(b"\n")
+        .context("failed to write route catalog newline")?;
+    Ok(())
+}
+
+fn build_sample_execute_route_calldata(plan: &ExecutionPlan) -> String {
+    let mut calldata = vec![0u8; 4 + (32 * 3)];
+    calldata[..4].copy_from_slice(&ethers::utils::id("executeRoute(uint256,uint256,uint256)")[..4]);
+    plan.route_id.to_big_endian(&mut calldata[4..36]);
+    plan.amount_in.to_big_endian(&mut calldata[36..68]);
+    plan.amount_out_minimum
+        .to_big_endian(&mut calldata[68..100]);
+    format!("0x{}", hex::encode(calldata))
+}
+
 fn read_build_env(key: &str) -> String {
     std::env::var(key)
         .ok()
@@ -728,7 +833,8 @@ fn preferred_quote_rank(token_map: &HashMap<Address, TokenDef>, token: Address) 
         Some("USDT0") => 1,
         Some("WETH") => 2,
         Some("WBTC") => 3,
-        Some("ARB") => 4,
+        Some("cbBTC") => 4,
+        Some("ARB") => 5,
         _ => 100,
     }
 }
@@ -820,6 +926,9 @@ fn info_directional_candidate(
             .unwrap_or_else(|| "n/a".to_string()),
         execution_calldata = execution_plan
             .map(|plan| plan.calldata_hex())
+            .unwrap_or_else(|| "n/a".to_string()),
+        execution_route_calldata = execution_plan
+            .map(|plan| plan.route_calldata_hex())
             .unwrap_or_else(|| "n/a".to_string()),
         "directional candidate"
     );

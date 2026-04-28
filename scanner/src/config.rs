@@ -41,6 +41,7 @@ pub struct ScannerConfig {
     pub log_execution_calldata: bool,
     pub debug_summary_enabled: bool,
     pub debug_jsonl_path: PathBuf,
+    pub route_catalog_path: PathBuf,
     pub start_from_latest: bool,
     pub tokens: Vec<TokenDef>,
     pub pools: Vec<PoolDef>,
@@ -109,6 +110,9 @@ impl ScannerConfig {
         let debug_jsonl_path = env::var("SCANNER_DEBUG_JSONL_PATH")
             .map(PathBuf::from)
             .unwrap_or_else(|_| PathBuf::from("data/directional-candidates.jsonl"));
+        let route_catalog_path = env::var("SCANNER_ROUTE_CATALOG_PATH")
+            .map(PathBuf::from)
+            .unwrap_or_else(|_| PathBuf::from("data/route-catalog.jsonl"));
         let start_from_latest = env::var("SCANNER_START_FROM_LATEST")
             .ok()
             .map(|raw| matches!(raw.as_str(), "1" | "true" | "TRUE" | "yes" | "YES"))
@@ -133,6 +137,7 @@ impl ScannerConfig {
             log_execution_calldata,
             debug_summary_enabled,
             debug_jsonl_path,
+            route_catalog_path,
             start_from_latest,
             tokens: core_tokens(),
             pools: core_pools(),
@@ -175,6 +180,12 @@ fn core_tokens() -> Vec<TokenDef> {
         TokenDef {
             symbol: "WBTC",
             address: addr("0x2f2a2543B76A4166549F7aaB2e75Bef0aefC5B0f"),
+            decimals: 8,
+            quote_amount_in: 2_000_000,
+        },
+        TokenDef {
+            symbol: "cbBTC",
+            address: addr("0xcbB7C0000aB88B473b1f5aFd9ef808440eed33Bf"),
             decimals: 8,
             quote_amount_in: 2_000_000,
         },
@@ -244,6 +255,46 @@ fn core_pools() -> Vec<PoolDef> {
             token1: addr("0xFd086bC7CD5C481DCC9C85ebE478A1C0b69FCbb9"),
             fee: 100,
             reserve_usd_hint: 2_561_040.728_1,
+        },
+        PoolDef {
+            name: "WBTC/cbBTC 0.01%",
+            address: addr("0x9B42809aaaE8d088eE01FE637E948784730F0386"),
+            token0: addr("0x2f2a2543B76A4166549F7aaB2e75Bef0aefC5B0f"),
+            token1: addr("0xcbB7C0000aB88B473b1f5aFd9ef808440eed33Bf"),
+            fee: 100,
+            reserve_usd_hint: 1_000_000.0,
+        },
+        PoolDef {
+            name: "WBTC/cbBTC 0.05%",
+            address: addr("0xE9f9F89bf71548Fefc9b70453B785515B3B98e45"),
+            token0: addr("0x2f2a2543B76A4166549F7aaB2e75Bef0aefC5B0f"),
+            token1: addr("0xcbB7C0000aB88B473b1f5aFd9ef808440eed33Bf"),
+            fee: 500,
+            reserve_usd_hint: 1_000_000.0,
+        },
+        PoolDef {
+            name: "USDC/cbBTC 0.01%",
+            address: addr("0x78d218D8549D5AB2E25fB7166219baBb3E9446C5"),
+            token0: addr("0xaf88d065e77c8cC2239327C5EDb3A432268e5831"),
+            token1: addr("0xcbB7C0000aB88B473b1f5aFd9ef808440eed33Bf"),
+            fee: 100,
+            reserve_usd_hint: 1_000_000.0,
+        },
+        PoolDef {
+            name: "USDT0/cbBTC 0.01%",
+            address: addr("0x56dBe966Ea9A9Ce3C449724D00F5DC619f74762D"),
+            token0: addr("0xFd086bC7CD5C481DCC9C85ebE478A1C0b69FCbb9"),
+            token1: addr("0xcbB7C0000aB88B473b1f5aFd9ef808440eed33Bf"),
+            fee: 100,
+            reserve_usd_hint: 1_000_000.0,
+        },
+        PoolDef {
+            name: "WETH/cbBTC 0.05%",
+            address: addr("0xb48B15861f9c5b513690fAD7240d741cb40798dE"),
+            token0: addr("0x82aF49447D8a07e3bd95BD0d56f35241523fBab1"),
+            token1: addr("0xcbB7C0000aB88B473b1f5aFd9ef808440eed33Bf"),
+            fee: 500,
+            reserve_usd_hint: 1_000_000.0,
         },
         PoolDef {
             name: "ARB/WETH 0.05%",

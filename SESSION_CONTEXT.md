@@ -50,6 +50,15 @@ Executor decision:
 - `TriangleArb` is now a compatibility wrapper over `RouteArb`.
 - Unit coverage verifies route storage, closed-path validation, hop-count validation, and owner-only route writes.
 
+Route graph decision:
+
+- Scanner route graph now enumerates 3-5 hop closed Uniswap V3 routes, not only triangles.
+- `cbBTC` is added to the tracked token set for BTC/stable routes.
+- Added cbBTC-related Uniswap V3 pools discovered from the Uniswap V3 factory by `eth_call`.
+- Route rotations are kept because the flash-loan start token matters for execution.
+- Scanner writes `SCANNER_ROUTE_CATALOG_PATH`, default `data/route-catalog.jsonl`, containing `setRoute(...)` calldata and sample `executeRoute(...)` calldata.
+- Verified locally with invalid RPC that route catalog generation does not require chain reads and includes `WBTC->USDT0->USDC->cbBTC->WBTC`.
+
 ## Objective
 
 Build a local-first triangle arbitrage system on Arbitrum with these priorities:

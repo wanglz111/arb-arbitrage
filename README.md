@@ -1,12 +1,12 @@
 # arb-arbitrage
 
-Local-first triangle arbitrage research and execution tooling for Arbitrum.
+Local-first fixed-route arbitrage research and execution tooling for Arbitrum.
 
-This repo is focused on one concrete goal: detect Uniswap v3 triangle opportunities fast enough to be useful in production, while keeping RPC usage low enough to run `24/7` on a real server. The current design favors off-chain local simulation for the hot path and keeps on-chain checks as the final safety layer.
+This repo is focused on one concrete goal: detect narrow Uniswap v3 closed-route opportunities fast enough to be useful in production, while keeping RPC usage low enough to run `24/7` on a real server. The current design favors off-chain local simulation for the hot path and keeps on-chain checks as the final safety layer.
 
 ## Goal
 
-- discover triangle arbitrage opportunities on Arbitrum quickly
+- discover 3-5 hop closed-route arbitrage opportunities on Arbitrum quickly
 - minimize long-running RPC and Alchemy quota usage
 - use Morpho flash loans as the preferred capital source
 - prepare execution calldata fast enough for an eventual sub-`200ms` reaction path
@@ -15,10 +15,11 @@ This repo is focused on one concrete goal: detect Uniswap v3 triangle opportunit
 
 Working pieces today:
 
-- Rust scanner for event-driven triangle discovery
+- Rust scanner for event-driven 3-5 hop route discovery
 - in-memory tracked-pool state with live `Swap` / `Mint` / `Burn` updates and HTTP backfill
 - rough scoring plus local coarse+refine size search
 - multi-tick local Uniswap v3 simulation across loaded initialized ticks
+- route catalog JSONL with `setRoute(...)` and sample `executeRoute(...)` calldata
 - fast local execution calldata construction
 - generic Solidity route executor and fork smoke tests
 - Docker image build and `docker compose` deployment path

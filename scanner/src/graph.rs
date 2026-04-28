@@ -7,14 +7,16 @@ use crate::{
     state::ScannerState,
 };
 
+const MIN_CYCLE_HOPS: usize = 3;
+const MAX_CYCLE_HOPS: usize = 5;
+
 #[derive(Clone, Debug)]
 pub struct TrianglePath {
     pub id: String,
     pub start_token: Address,
-    pub middle_token_1: Address,
-    pub middle_token_2: Address,
-    pub pools: [Address; 3],
-    pub fees: [u32; 3],
+    pub tokens: Vec<Address>,
+    pub pools: Vec<Address>,
+    pub fees: Vec<u32>,
 }
 
 #[derive(Clone, Debug)]
@@ -36,52 +38,34 @@ pub struct TriangleGraph {
 
 impl TriangleGraph {
     pub fn build(pools: &[PoolDef]) -> Self {
+        let mut adjacency: HashMap<Address, Vec<&PoolDef>> = HashMap::new();
+        for pool in pools {
+            adjacency.entry(pool.token0).or_default().push(pool);
+            adjacency.entry(pool.token1).or_default().push(pool);
+        }
+
         let mut seen = HashSet::new();
         let mut triangles = Vec::new();
 
-        for first in pools {
-            for &start_token in &[first.token0, first.token1] {
-                let middle_token_1 = other_token(first, start_token);
-
-                for second in pools.iter().filter(|pool| {
-                    pool.address != first.address
-                        && (pool.token0 == middle_token_1 || pool.token1 == middle_token_1)
-                }) {
-                    let middle_token_2 = other_token(second, middle_token_1);
-                    if middle_token_2 == start_token {
-                        continue;
-                    }
-
-                    for third in pools.iter().filter(|pool| {
-                        pool.address != first.address
-                            && pool.address != second.address
-                            && ((pool.token0 == middle_token_2 && pool.token1 == start_token)
-                                || (pool.token1 == middle_token_2 && pool.token0 == start_token))
-                    }) {
-                        let id = format!(
-                            "{start_token:?}:{middle_token_1:?}:{middle_token_2:?}:{}:{}:{}",
-                            first.address, second.address, third.address
-                        );
-                        if !seen.insert(id.clone()) {
-                            continue;
-                        }
-
-                        triangles.push(TrianglePath {
-                            id,
-                            start_token,
-                            middle_token_1,
-                            middle_token_2,
-                            pools: [first.address, second.address, third.address],
-                            fees: [first.fee, second.fee, third.fee],
-                        });
-                    }
-                }
-            }
+        for &start_token in adjacency.keys() {
+            let mut tokens = vec![start_token];
+            let mut route_pools = Vec::new();
+            let mut route_fees = Vec::new();
+            enumerate_cycles(
+                start_token,
+                start_token,
+                &adjacency,
+                &mut tokens,
+                &mut route_pools,
+                &mut route_fees,
+                &mut seen,
+                &mut triangles,
+            );
         }
 
         let mut pool_to_triangles: HashMap<Address, Vec<usize>> = HashMap::new();
         for (idx, triangle) in triangles.iter().enumerate() {
-            for pool in triangle.pools {
+            for &pool in &triangle.pools {
                 pool_to_triangles.entry(pool).or_default().push(idx);
             }
         }
@@ -106,32 +90,11 @@ impl TriangleGraph {
         state: &ScannerState,
         token_map: &HashMap<Address, TokenDef>,
     ) -> Option<f64> {
-        let legs = [
-            (
-                triangle.start_token,
-                triangle.middle_token_1,
-                triangle.pools[0],
-                triangle.fees[0],
-            ),
-            (
-                triangle.middle_token_1,
-                triangle.middle_token_2,
-                triangle.pools[1],
-                triangle.fees[1],
-            ),
-            (
-                triangle.middle_token_2,
-                triangle.start_token,
-                triangle.pools[2],
-                triangle.fees[2],
-            ),
-        ];
-
         let mut gross = 1.0f64;
-        for (token_in, token_out, pool_address, fee) in legs {
-            let pool_state = state.pools.get(&pool_address)?;
-            let spot_rate = pool_state.spot_rate(token_in, token_out, token_map)?;
-            let fee_factor = 1.0 - (fee as f64 / 1_000_000.0);
+        for leg in triangle.legs() {
+            let pool_state = state.pools.get(&leg.pool)?;
+            let spot_rate = pool_state.spot_rate(leg.token_in, leg.token_out, token_map)?;
+            let fee_factor = 1.0 - (leg.fee as f64 / 1_000_000.0);
             gross *= spot_rate * fee_factor;
         }
 
@@ -140,59 +103,149 @@ impl TriangleGraph {
 }
 
 impl TrianglePath {
+    pub fn legs(&self) -> impl Iterator<Item = RouteLeg> + '_ {
+        self.pools
+            .iter()
+            .copied()
+            .zip(self.fees.iter().copied())
+            .enumerate()
+            .map(|(idx, (pool, fee))| RouteLeg {
+                token_in: self.tokens[idx],
+                token_out: self.tokens[idx + 1],
+                pool,
+                fee,
+            })
+    }
+
     pub fn canonical_view(&self) -> CanonicalTriangleView {
-        let tokens = [self.start_token, self.middle_token_1, self.middle_token_2];
-        let pools = self.pools.map(|pool| format!("{pool:?}"));
-
-        let mut best_key = String::new();
-
-        for offset in 0..3 {
-            let rotated_tokens = [
-                tokens[offset % 3],
-                tokens[(offset + 1) % 3],
-                tokens[(offset + 2) % 3],
-            ];
-            let rotated_fees = [
-                self.fees[offset % 3],
-                self.fees[(offset + 1) % 3],
-                self.fees[(offset + 2) % 3],
-            ];
-
-            let key = format!(
-                "{:?}:{:?}:{:?}|{}:{}:{}|{}:{}:{}",
-                rotated_tokens[0],
-                rotated_tokens[1],
-                rotated_tokens[2],
-                pools[offset % 3],
-                pools[(offset + 1) % 3],
-                pools[(offset + 2) % 3],
-                rotated_fees[0],
-                rotated_fees[1],
-                rotated_fees[2],
-            );
-
-            if best_key.is_empty() || key < best_key {
-                best_key = key;
-            }
-        }
-
         CanonicalTriangleView {
-            dedupe_key: best_key,
+            dedupe_key: route_id(&self.tokens, &self.pools, &self.fees),
         }
     }
 
     pub fn display_view(&self, token_map: &HashMap<Address, TokenDef>) -> TriangleDisplayView {
         TriangleDisplayView {
-            label: format!(
-                "{}->{}->{}->{}",
-                token_symbol(token_map, self.start_token),
-                token_symbol(token_map, self.middle_token_1),
-                token_symbol(token_map, self.middle_token_2),
-                token_symbol(token_map, self.start_token),
-            ),
-            fee_label: format!("{} / {} / {} bps", self.fees[0], self.fees[1], self.fees[2]),
+            label: self
+                .tokens
+                .iter()
+                .map(|token| token_symbol(token_map, *token))
+                .collect::<Vec<_>>()
+                .join("->"),
+            fee_label: self
+                .fees
+                .iter()
+                .map(u32::to_string)
+                .collect::<Vec<_>>()
+                .join(" / "),
         }
     }
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct RouteLeg {
+    pub token_in: Address,
+    pub token_out: Address,
+    pub pool: Address,
+    pub fee: u32,
+}
+
+#[allow(clippy::too_many_arguments)]
+fn enumerate_cycles(
+    start_token: Address,
+    current_token: Address,
+    adjacency: &HashMap<Address, Vec<&PoolDef>>,
+    tokens: &mut Vec<Address>,
+    route_pools: &mut Vec<Address>,
+    route_fees: &mut Vec<u32>,
+    seen: &mut HashSet<String>,
+    triangles: &mut Vec<TrianglePath>,
+) {
+    if route_pools.len() >= MAX_CYCLE_HOPS {
+        return;
+    }
+
+    let Some(next_pools) = adjacency.get(&current_token) else {
+        return;
+    };
+
+    for pool in next_pools {
+        if route_pools.contains(&pool.address) {
+            continue;
+        }
+
+        let next_token = other_token(pool, current_token);
+        let next_hop_count = route_pools.len() + 1;
+        let closes_cycle = next_token == start_token;
+
+        if closes_cycle {
+            if next_hop_count < MIN_CYCLE_HOPS {
+                continue;
+            }
+
+            route_pools.push(pool.address);
+            route_fees.push(pool.fee);
+            tokens.push(start_token);
+
+            let id = route_id(tokens, route_pools, route_fees);
+            let candidate = TrianglePath {
+                id: id.clone(),
+                start_token,
+                tokens: tokens.clone(),
+                pools: route_pools.clone(),
+                fees: route_fees.clone(),
+            };
+            let canonical = candidate.canonical_view();
+            if seen.insert(canonical.dedupe_key) {
+                triangles.push(candidate);
+            }
+
+            tokens.pop();
+            route_fees.pop();
+            route_pools.pop();
+            continue;
+        }
+
+        if next_hop_count >= MAX_CYCLE_HOPS || tokens.contains(&next_token) {
+            continue;
+        }
+
+        route_pools.push(pool.address);
+        route_fees.push(pool.fee);
+        tokens.push(next_token);
+        enumerate_cycles(
+            start_token,
+            next_token,
+            adjacency,
+            tokens,
+            route_pools,
+            route_fees,
+            seen,
+            triangles,
+        );
+        tokens.pop();
+        route_fees.pop();
+        route_pools.pop();
+    }
+}
+
+fn route_id(tokens: &[Address], pools: &[Address], fees: &[u32]) -> String {
+    format!(
+        "{}|{}|{}",
+        tokens
+            .iter()
+            .map(|token| format!("{token:?}"))
+            .collect::<Vec<_>>()
+            .join(":"),
+        pools
+            .iter()
+            .map(|pool| format!("{pool:?}"))
+            .collect::<Vec<_>>()
+            .join(":"),
+        fees.iter()
+            .map(u32::to_string)
+            .collect::<Vec<_>>()
+            .join(":")
+    )
 }
 
 fn other_token(pool: &PoolDef, token: Address) -> Address {

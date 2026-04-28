@@ -128,30 +128,12 @@ pub fn simulate_triangle_amount(
         return None;
     }
 
-    let legs = [
-        (
-            triangle.start_token,
-            triangle.middle_token_1,
-            triangle.pools[0],
-        ),
-        (
-            triangle.middle_token_1,
-            triangle.middle_token_2,
-            triangle.pools[1],
-        ),
-        (
-            triangle.middle_token_2,
-            triangle.start_token,
-            triangle.pools[2],
-        ),
-    ];
-
     let mut amount = amount_in;
     let mut crossed_tick_legs = 0u8;
     let mut max_headroom_ratio = 0.0f64;
-    for (token_in, token_out, pool_address) in legs {
-        let pool_state = state.pools.get(&pool_address)?;
-        let leg_result = pool_state.simulate_swap_raw(amount, token_in, token_out)?;
+    for leg in triangle.legs() {
+        let pool_state = state.pools.get(&leg.pool)?;
+        let leg_result = pool_state.simulate_swap_raw(amount, leg.token_in, leg.token_out)?;
         if leg_result.crosses_tick {
             crossed_tick_legs = crossed_tick_legs.saturating_add(1);
         }
@@ -671,14 +653,13 @@ mod tests {
         let triangle = TrianglePath {
             id: "test".to_string(),
             start_token: usdc,
-            middle_token_1: weth,
-            middle_token_2: usdt0,
-            pools: [
+            tokens: vec![usdc, weth, usdt0, usdc],
+            pools: vec![
                 addr("0x1000000000000000000000000000000000000001"),
                 addr("0x1000000000000000000000000000000000000002"),
                 addr("0x1000000000000000000000000000000000000003"),
             ],
-            fees: [500, 500, 500],
+            fees: vec![500, 500, 500],
         };
 
         let token_map = HashMap::from([
