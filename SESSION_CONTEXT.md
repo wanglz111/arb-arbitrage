@@ -634,3 +634,15 @@ After this execution-handoff pass, the most natural next build steps are:
   - `cargo fmt --manifest-path scanner/Cargo.toml`
   - `cargo test --manifest-path scanner/Cargo.toml`
   - `cargo clippy --manifest-path scanner/Cargo.toml -- -D warnings`
+- Route catalog smoke:
+  - ran scanner startup with all RPC endpoints pointed at `http://127.0.0.1:9`
+  - no paid RPC/CU was spent
+  - scanner wrote `data/route-catalog.jsonl` before entering latest-block retry
+  - current generated catalog contains `724` route entries with `setRoute(...)` and sample `executeRoute(...)` calldata
+  - file is ignored by git and intentionally not committed
+- Solidity test cleanup:
+  - `MorphoFlashLoanTest` now returns early when the configured Arbitrum Morpho address has no code
+  - this keeps the probe meaningful on fork while making local non-fork tests deterministic
+  - validation:
+    - `forge build`
+    - `forge test --no-match-contract TriangleArbForkTest`
