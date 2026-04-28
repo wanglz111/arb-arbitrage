@@ -34,6 +34,14 @@ Packaging decision made this round:
 - Pre-commit builds from the staged git tree and tags images as `tree-<staged-tree-hash>` because final commit SHA is not available before commit creation.
 - Pre-commit writes local `scanner-image.env`; the file is gitignored.
 
+Quiet debug mode decision:
+
+- `SCANNER_DEBUG_SUMMARY_ENABLED=true` now means quiet directional observation, not periodic noisy summaries.
+- Normal pool event/backfill logs are suppressed in this mode.
+- Only positive-direction candidates are logged.
+- Directional candidates are appended to `SCANNER_DEBUG_JSONL_PATH`, defaulting to `data/directional-candidates.jsonl`.
+- Docker Compose mounts `./data:/app/data` so the JSONL output is retained outside the scanner container.
+
 ## Objective
 
 Build a local-first triangle arbitrage system on Arbitrum with these priorities:

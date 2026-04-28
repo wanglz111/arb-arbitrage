@@ -110,7 +110,7 @@ More details are in [DEPLOYMENT.md](/Users/edy/lucas/arb-arbitrage/DEPLOYMENT.md
 
 - hot path should not depend on exact quote RPC
 - Alchemy should be treated as a scarce resource, with an effective target budget around `20M CUs / month`
-- debug mode currently favors observation and summary output over automatic triggering
+- debug mode is quiet by default and only emits directional candidates, also saved as JSONL
 
 ## Next Steps
 

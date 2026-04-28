@@ -22,7 +22,9 @@ ARG SCANNER_BUILD_CREATED=unknown
 RUN apt-get update && \
     apt-get install -y --no-install-recommends ca-certificates && \
     rm -rf /var/lib/apt/lists/* && \
-    useradd --create-home --uid 10001 appuser
+    useradd --create-home --uid 10001 appuser && \
+    mkdir -p /app/data && \
+    chown -R appuser:appuser /app
 
 WORKDIR /app
 

@@ -113,12 +113,13 @@ That means the expected location for RPC config is the repo root, one level abov
 - `SCANNER_DEBUG_SUMMARY_ENABLED`
   - optional
   - defaults to `false`
-  - if `true`, candidate-level `affected triangle rescored` logs are suppressed
-  - instead, the scanner emits one periodic debug summary for locally profitable candidates only
-- `SCANNER_DEBUG_SUMMARY_INTERVAL_SECS`
+  - if `true`, normal scanner event/backfill logs are suppressed
+  - only locally or exactly positive directional candidates are logged
+  - each directional candidate is also appended as JSONL
+- `SCANNER_DEBUG_JSONL_PATH`
   - optional
-  - defaults to `300`
-  - controls the debug-summary window size in seconds
+  - defaults to `data/directional-candidates.jsonl`
+  - path used for quiet-mode directional candidate JSONL output
 - `QUOTE_RPC_URL`
   - optional
   - defaults to `HTTP_RPC_URL`
@@ -185,12 +186,12 @@ Execution source meanings:
 - `exact`: calldata was prepared from an exact `QuoterV2` result
 - `none`: no execution plan could be built
 
-When `SCANNER_DEBUG_SUMMARY_ENABLED=true`, the scanner switches to summary output for candidate observations. Each summary window logs:
+When `SCANNER_DEBUG_SUMMARY_ENABLED=true`, the scanner switches to quiet directional observation. It suppresses normal event/backfill logs and only logs candidates with positive local or exact direction. Each record is appended to `SCANNER_DEBUG_JSONL_PATH` and includes:
 
-- `positive_candidates`
-- `max_local_edge_bps`
-- `max_local_gross_profit`
-- `most_common_triangle`
+- route and fee sequence
+- local amount, edge, gross profit, tick-crossing metadata
+- optional exact quote result
+- prepared executor calldata when available
 
 ## Next Steps
 

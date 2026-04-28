@@ -68,4 +68,5 @@ Because `docker-compose.yml` uses `pull_policy: always`, re-running `docker comp
 - The Docker image only contains the Rust scanner binary.
 - The local `.env` file is excluded from git and Docker build context.
 - `scanner-image.env` is generated locally and ignored by git.
+- `docker-compose.yml` mounts `./data` into `/app/data` so quiet-mode directional JSONL survives container restarts.
 - The staged tree hash is used because `pre-commit` runs before a final commit SHA exists.

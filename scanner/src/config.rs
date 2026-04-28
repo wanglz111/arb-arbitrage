@@ -1,4 +1,4 @@
-use std::{collections::HashMap, env, time::Duration};
+use std::{collections::HashMap, env, path::PathBuf, time::Duration};
 
 use anyhow::{Context, Result};
 use ethers::types::Address;
@@ -40,7 +40,7 @@ pub struct ScannerConfig {
     pub execution_slippage_bps: u32,
     pub log_execution_calldata: bool,
     pub debug_summary_enabled: bool,
-    pub debug_summary_interval: Duration,
+    pub debug_jsonl_path: PathBuf,
     pub start_from_latest: bool,
     pub tokens: Vec<TokenDef>,
     pub pools: Vec<PoolDef>,
@@ -106,10 +106,9 @@ impl ScannerConfig {
             .ok()
             .map(|raw| matches!(raw.as_str(), "1" | "true" | "TRUE" | "yes" | "YES"))
             .unwrap_or(false);
-        let debug_summary_interval_secs = env::var("SCANNER_DEBUG_SUMMARY_INTERVAL_SECS")
-            .unwrap_or_else(|_| "300".to_string())
-            .parse::<u64>()
-            .context("failed to parse SCANNER_DEBUG_SUMMARY_INTERVAL_SECS")?;
+        let debug_jsonl_path = env::var("SCANNER_DEBUG_JSONL_PATH")
+            .map(PathBuf::from)
+            .unwrap_or_else(|_| PathBuf::from("data/directional-candidates.jsonl"));
         let start_from_latest = env::var("SCANNER_START_FROM_LATEST")
             .ok()
             .map(|raw| matches!(raw.as_str(), "1" | "true" | "TRUE" | "yes" | "YES"))
@@ -133,7 +132,7 @@ impl ScannerConfig {
             execution_slippage_bps,
             log_execution_calldata,
             debug_summary_enabled,
-            debug_summary_interval: Duration::from_secs(debug_summary_interval_secs.max(1)),
+            debug_jsonl_path,
             start_from_latest,
             tokens: core_tokens(),
             pools: core_pools(),

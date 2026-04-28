@@ -2691,6 +2691,7 @@ dependencies = [
  "dotenvy",
  "ethers",
  "futures-util",
+ "serde_json",
  "tokio",
  "tracing",
  "tracing-subscriber",

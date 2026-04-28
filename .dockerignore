@@ -8,3 +8,4 @@ cache
 out
 scanner/target
 scanner-image.env
+data/*.jsonl

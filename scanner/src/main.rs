@@ -9,15 +9,19 @@ mod watcher;
 
 use std::{
     collections::{HashMap, HashSet},
+    fs::{File, OpenOptions},
+    io::{BufWriter, Write},
     path::PathBuf,
     sync::Arc,
-    time::Duration,
+    time::{SystemTime, UNIX_EPOCH},
 };
 
 use anyhow::{Context, Result};
 use dotenvy::from_path;
 use ethers::providers::{Http, Middleware, Provider};
 use ethers::types::{Address, U256};
+use ethers::utils::hex;
+use serde_json::json;
 use tokio::sync::mpsc;
 use tracing::{info, warn};
 
@@ -73,124 +77,100 @@ impl QuoteThrottle {
     }
 }
 
-#[derive(Clone, Debug)]
-struct MaxEdgeObservation {
-    triangle_label: String,
-    start_token: Address,
-    edge_bps: f64,
+struct DirectionalJsonlWriter {
+    writer: BufWriter<File>,
 }
 
-#[derive(Clone, Debug)]
-struct MaxProfitObservation {
-    triangle_label: String,
-    gross_profit: f64,
-}
-
-#[derive(Default, Debug)]
-struct DebugSummaryCollector {
-    positive_candidates: usize,
-    max_local_edge: Option<MaxEdgeObservation>,
-    max_local_gross_profit_by_token: HashMap<Address, MaxProfitObservation>,
-    triangle_hits: HashMap<String, usize>,
-}
-
-impl DebugSummaryCollector {
-    fn record_candidate(&mut self, candidate: &RoughCandidate) {
-        let Some(local_quote) = candidate.local_quote.as_ref() else {
-            return;
-        };
-        if !local_quote.gross_profit.is_finite() || local_quote.gross_profit <= 0.0 {
-            return;
-        }
-
-        self.positive_candidates += 1;
-
-        if self
-            .max_local_edge
-            .as_ref()
-            .map(|current| local_quote.edge_bps > current.edge_bps)
-            .unwrap_or(true)
+impl DirectionalJsonlWriter {
+    fn new(path: &PathBuf) -> Result<Self> {
+        if let Some(parent) = path.parent()
+            && !parent.as_os_str().is_empty()
         {
-            self.max_local_edge = Some(MaxEdgeObservation {
-                triangle_label: candidate.triangle_label.clone(),
-                start_token: candidate.triangle.start_token,
-                edge_bps: local_quote.edge_bps,
-            });
+            std::fs::create_dir_all(parent)
+                .with_context(|| format!("failed to create {}", parent.display()))?;
         }
 
-        let profit_entry = self
-            .max_local_gross_profit_by_token
-            .entry(candidate.triangle.start_token)
-            .or_insert_with(|| MaxProfitObservation {
-                triangle_label: candidate.triangle_label.clone(),
-                gross_profit: local_quote.gross_profit,
-            });
-        if local_quote.gross_profit > profit_entry.gross_profit {
-            *profit_entry = MaxProfitObservation {
-                triangle_label: candidate.triangle_label.clone(),
-                gross_profit: local_quote.gross_profit,
-            };
-        }
+        let file = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)
+            .with_context(|| format!("failed to open {}", path.display()))?;
 
-        *self
-            .triangle_hits
-            .entry(candidate.triangle_label.clone())
-            .or_default() += 1;
+        Ok(Self {
+            writer: BufWriter::new(file),
+        })
     }
 
-    fn log_and_reset(&mut self, interval: Duration, token_map: &HashMap<Address, TokenDef>) {
-        let snapshot = std::mem::take(self);
-
-        if snapshot.positive_candidates == 0 {
-            info!(
-                window_secs = interval.as_secs(),
-                positive_candidates = 0,
-                max_local_edge_bps = "n/a",
-                max_local_edge_triangle = "n/a",
-                max_local_edge_token = "n/a",
-                max_local_gross_profit = "n/a",
-                most_common_triangle = "n/a",
-                most_common_triangle_hits = 0,
-                "debug candidate summary"
-            );
-            return;
-        }
-
-        let max_local_edge = snapshot
-            .max_local_edge
-            .as_ref()
-            .map(|observation| format!("{:.2}", observation.edge_bps))
-            .unwrap_or_else(|| "n/a".to_string());
-        let max_local_edge_triangle = snapshot
-            .max_local_edge
-            .as_ref()
-            .map(|observation| observation.triangle_label.clone())
-            .unwrap_or_else(|| "n/a".to_string());
-        let max_local_edge_token = snapshot
-            .max_local_edge
-            .as_ref()
-            .and_then(|observation| token_map.get(&observation.start_token))
+    fn write_candidate(
+        &mut self,
+        candidate: &RoughCandidate,
+        token_map: &HashMap<Address, TokenDef>,
+        quote_result: Option<&ExactQuoteResult>,
+        execution_plan: Option<&ExecutionPlan>,
+        execution_source: &'static str,
+        block_number: u64,
+    ) -> Result<()> {
+        let start_token = token_map
+            .get(&candidate.triangle.start_token)
             .map(|token| token.symbol)
             .unwrap_or("UNKNOWN");
-        let max_local_gross_profit =
-            format_profit_summary(&snapshot.max_local_gross_profit_by_token, token_map);
-        let (most_common_triangle, most_common_triangle_hits) = snapshot
-            .triangle_hits
-            .into_iter()
-            .max_by_key(|(_, hits)| *hits)
-            .unwrap_or_else(|| ("n/a".to_string(), 0usize));
+        let local_quote = candidate.local_quote.as_ref();
+        let now_ms = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|duration| duration.as_millis())
+            .unwrap_or_default();
 
-        info!(
-            window_secs = interval.as_secs(),
-            positive_candidates = snapshot.positive_candidates,
-            max_local_edge_bps = max_local_edge,
-            max_local_edge_triangle = max_local_edge_triangle,
-            max_local_edge_token = max_local_edge_token,
-            max_local_gross_profit = max_local_gross_profit,
-            most_common_triangle = most_common_triangle,
-            most_common_triangle_hits = most_common_triangle_hits,
-            "debug candidate summary"
-        );
+        let record = json!({
+            "ts_ms": now_ms,
+            "block_number": block_number,
+            "triangle": candidate.triangle_label,
+            "fees": candidate.fee_label,
+            "start_token": start_token,
+            "canonical_key": candidate.canonical_key,
+            "rough_edge_bps": candidate.rough_edge_bps,
+            "local": local_quote.map(|quote| json!({
+                "amount_in_raw": quote.amount_in_raw.to_string(),
+                "amount_out_raw_floor": quote.amount_out_raw_floor.to_string(),
+                "amount_in": format_amount_f64(quote.amount_in, token_map, candidate.triangle.start_token),
+                "amount_out": format_amount_f64(quote.amount_out, token_map, candidate.triangle.start_token),
+                "gross_profit": format_amount_f64(quote.gross_profit, token_map, candidate.triangle.start_token),
+                "edge_bps": quote.edge_bps,
+                "size_bps": quote.size_bps,
+                "crosses_tick": quote.crosses_tick,
+                "crossed_tick_legs": quote.crossed_tick_legs,
+                "max_headroom_ratio": quote.max_headroom_ratio,
+                "search_samples": quote.search_samples,
+                "refinement_samples": quote.refinement_samples,
+            })),
+            "exact": quote_result.map(|quote| json!({
+                "amount_in": quote.amount_in.to_string(),
+                "amount_out": quote.amount_out.to_string(),
+                "edge_bps": exact_edge_bps(quote),
+                "gas_estimate": quote.gas_estimate.to_string(),
+            })),
+            "execution": execution_plan.map(|plan| json!({
+                "source": execution_source,
+                "loan_token": token_map
+                    .get(&plan.loan_token)
+                    .map(|token| token.symbol)
+                    .unwrap_or("UNKNOWN"),
+                "amount_in": plan.amount_in.to_string(),
+                "expected_amount_out": plan.expected_amount_out.to_string(),
+                "amount_out_minimum": plan.amount_out_minimum.to_string(),
+                "slippage_bps": plan.slippage_bps,
+                "path_hex": format!("0x{}", hex::encode(plan.path.as_ref())),
+                "calldata": plan.calldata_hex(),
+                "calldata_bytes": plan.execute_calldata.len(),
+            })),
+        });
+
+        serde_json::to_writer(&mut self.writer, &record)
+            .context("failed to encode jsonl record")?;
+        self.writer
+            .write_all(b"\n")
+            .context("failed to write jsonl newline")?;
+        self.writer.flush().context("failed to flush jsonl")?;
+        Ok(())
     }
 }
 
@@ -209,7 +189,7 @@ impl<'a> CandidateProcessor<'a> {
         state: &mut ScannerState,
         event: PoolStateEvent,
         quote_throttle: &mut QuoteThrottle,
-        debug_summary: &mut DebugSummaryCollector,
+        directional_writer: &mut Option<DirectionalJsonlWriter>,
     ) {
         let pool_address = event.pool();
         let block_number = event.block_number();
@@ -228,17 +208,21 @@ impl<'a> CandidateProcessor<'a> {
             PoolStateEvent::Liquidity(_) => "burn",
         };
 
-        info!(
-            source = source,
-            event = event_kind,
-            pool = pool.name,
-            block = block_number,
-            log_index = log_index,
-            "received pool event"
-        );
+        if !self.config.debug_summary_enabled {
+            info!(
+                source = source,
+                event = event_kind,
+                pool = pool.name,
+                block = block_number,
+                log_index = log_index,
+                "received pool event"
+            );
+        }
 
         if !state.apply_pool_event(pool, &event) {
-            if let Some(pool_state) = state.pools.get(&pool_address) {
+            if !self.config.debug_summary_enabled
+                && let Some(pool_state) = state.pools.get(&pool_address)
+            {
                 info!(
                     source = source,
                     pool = pool.name,
@@ -253,7 +237,9 @@ impl<'a> CandidateProcessor<'a> {
             return;
         }
 
-        if let Some(pool_state) = state.pools.get(&pool_address) {
+        if !self.config.debug_summary_enabled
+            && let Some(pool_state) = state.pools.get(&pool_address)
+        {
             info!(
                 source = source,
                 pool = pool_state.pool.name,
@@ -275,7 +261,7 @@ impl<'a> CandidateProcessor<'a> {
             &changed_pools,
             block_number,
             quote_throttle,
-            debug_summary,
+            directional_writer,
         )
         .await;
     }
@@ -286,7 +272,7 @@ impl<'a> CandidateProcessor<'a> {
         changed_pools: &HashSet<Address>,
         block_number: u64,
         quote_throttle: &mut QuoteThrottle,
-        debug_summary: &mut DebugSummaryCollector,
+        directional_writer: &mut Option<DirectionalJsonlWriter>,
     ) {
         let shortlist = build_shortlist(
             self.graph,
@@ -375,7 +361,28 @@ impl<'a> CandidateProcessor<'a> {
                 .or(local_execution_plan.as_ref());
 
             if self.config.debug_summary_enabled {
-                debug_summary.record_candidate(&candidate);
+                if is_directional_candidate(&candidate, quote_result.as_ref()) {
+                    info_directional_candidate(
+                        &candidate,
+                        self.token_map,
+                        quote_result.as_ref(),
+                        execution_plan,
+                        execution_source,
+                    );
+
+                    if let Some(writer) = directional_writer
+                        && let Err(error) = writer.write_candidate(
+                            &candidate,
+                            self.token_map,
+                            quote_result.as_ref(),
+                            execution_plan,
+                            execution_source,
+                            block_number,
+                        )
+                    {
+                        warn!(error = %error, "failed to write directional candidate jsonl");
+                    }
+                }
             } else {
                 info_triangle(
                     &candidate,
@@ -425,40 +432,39 @@ async fn main() -> Result<()> {
     };
     let mut live_receiver = watcher::spawn_live_pool_watcher(config.clone());
     let mut quote_throttle = QuoteThrottle::new();
-    let mut debug_summary = DebugSummaryCollector::default();
+    let mut directional_writer = if config.debug_summary_enabled {
+        Some(DirectionalJsonlWriter::new(&config.debug_jsonl_path)?)
+    } else {
+        None
+    };
     let tracked_reserve_hint_usd: f64 = config.pools.iter().map(|pool| pool.reserve_usd_hint).sum();
-    let mut debug_summary_interval = config
-        .debug_summary_enabled
-        .then(|| tokio::time::interval(config.debug_summary_interval));
-    if let Some(interval) = debug_summary_interval.as_mut() {
-        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-        interval.tick().await;
-    }
 
-    info!(
-        pools = config.pools.len(),
-        triangles = graph.triangles.len(),
-        poll_ms = config.poll_interval.as_millis(),
-        max_log_block_range = config.max_log_block_range,
-        ws_live_logs = config.log_ws_url.is_some(),
-        rpc_retry_ms = config.rpc_retry_delay.as_millis(),
-        min_candidate_edge_bps = format!("{:.2}", config.min_candidate_edge_bps),
-        min_local_edge_bps = format!("{:.2}", config.min_local_edge_bps),
-        rough_shortlist_size = config.rough_shortlist_size,
-        local_size_bps = format_size_bps_list(&config.local_size_bps),
-        exact_quote_enabled = config.exact_quote_enabled,
-        max_exact_quotes_per_block = config.max_exact_quotes_per_block,
-        execution_slippage_bps = config.execution_slippage_bps,
-        log_execution_calldata = config.log_execution_calldata,
-        debug_summary_enabled = config.debug_summary_enabled,
-        debug_summary_interval_secs = config.debug_summary_interval.as_secs(),
-        tracked_reserve_hint_usd = format!("{tracked_reserve_hint_usd:.0}"),
-        scanner_version = build_metadata.version,
-        image_git_sha = build_metadata.git_sha.as_str(),
-        image_git_ref = build_metadata.git_ref.as_str(),
-        image_created_at = build_metadata.created_at.as_str(),
-        "scanner starting"
-    );
+    if !config.debug_summary_enabled {
+        info!(
+            pools = config.pools.len(),
+            triangles = graph.triangles.len(),
+            poll_ms = config.poll_interval.as_millis(),
+            max_log_block_range = config.max_log_block_range,
+            ws_live_logs = config.log_ws_url.is_some(),
+            rpc_retry_ms = config.rpc_retry_delay.as_millis(),
+            min_candidate_edge_bps = format!("{:.2}", config.min_candidate_edge_bps),
+            min_local_edge_bps = format!("{:.2}", config.min_local_edge_bps),
+            rough_shortlist_size = config.rough_shortlist_size,
+            local_size_bps = format_size_bps_list(&config.local_size_bps),
+            exact_quote_enabled = config.exact_quote_enabled,
+            max_exact_quotes_per_block = config.max_exact_quotes_per_block,
+            execution_slippage_bps = config.execution_slippage_bps,
+            log_execution_calldata = config.log_execution_calldata,
+            debug_summary_enabled = config.debug_summary_enabled,
+            debug_jsonl_path = %config.debug_jsonl_path.display(),
+            tracked_reserve_hint_usd = format!("{tracked_reserve_hint_usd:.0}"),
+            scanner_version = build_metadata.version,
+            image_git_sha = build_metadata.git_sha.as_str(),
+            image_git_ref = build_metadata.git_ref.as_str(),
+            image_created_at = build_metadata.created_at.as_str(),
+            "scanner starting"
+        );
+    }
 
     let latest_block =
         fetch_latest_block_with_retry(provider.clone(), config.rpc_retry_delay).await;
@@ -469,23 +475,21 @@ async fn main() -> Result<()> {
     };
 
     let mut state = ScannerState::bootstrap(provider.clone(), &config, latest_block).await?;
-    info!(
-        block = latest_block,
-        tracked_pools = state.pools.len(),
-        "bootstrap complete"
-    );
+    if !config.debug_summary_enabled {
+        info!(
+            block = latest_block,
+            tracked_pools = state.pools.len(),
+            "bootstrap complete"
+        );
+    }
 
     loop {
         tokio::select! {
             _ = tokio::signal::ctrl_c() => {
-                if config.debug_summary_enabled {
-                    debug_summary.log_and_reset(config.debug_summary_interval, &token_map);
+                if !config.debug_summary_enabled {
+                    info!("received ctrl-c, shutting down");
                 }
-                info!("received ctrl-c, shutting down");
                 break;
-            }
-            _ = recv_debug_summary_tick(&mut debug_summary_interval) => {
-                debug_summary.log_and_reset(config.debug_summary_interval, &token_map);
             }
             Some(event) = recv_live_event(&mut live_receiver) => {
                 processor
@@ -494,7 +498,7 @@ async fn main() -> Result<()> {
                         &mut state,
                         event,
                         &mut quote_throttle,
-                        &mut debug_summary,
+                        &mut directional_writer,
                     )
                 .await;
             }
@@ -538,15 +542,17 @@ async fn main() -> Result<()> {
                     .filter(|update| matches!(update, PoolStateEvent::Swap(_)))
                     .count();
                 let liquidity_events = updates.len().saturating_sub(swap_events);
-                info!(
-                    from_block = next_block,
-                    to_block = latest_block,
-                    pool_events = updates.len(),
-                    swap_events,
-                    liquidity_events,
-                    changed_pools = unique_pools.len(),
-                    "detected backfill pool activity"
-                );
+                if !config.debug_summary_enabled {
+                    info!(
+                        from_block = next_block,
+                        to_block = latest_block,
+                        pool_events = updates.len(),
+                        swap_events,
+                        liquidity_events,
+                        changed_pools = unique_pools.len(),
+                        "detected backfill pool activity"
+                    );
+                }
 
                 for event in updates {
                     processor
@@ -555,7 +561,7 @@ async fn main() -> Result<()> {
                             &mut state,
                             event,
                             &mut quote_throttle,
-                            &mut debug_summary,
+                            &mut directional_writer,
                         )
                         .await;
                 }
@@ -613,15 +619,6 @@ async fn recv_live_event(
     match receiver {
         Some(receiver) => receiver.recv().await,
         None => std::future::pending::<Option<PoolStateEvent>>().await,
-    }
-}
-
-async fn recv_debug_summary_tick(interval: &mut Option<tokio::time::Interval>) {
-    match interval {
-        Some(interval) => {
-            interval.tick().await;
-        }
-        None => std::future::pending::<()>().await,
     }
 }
 
@@ -734,6 +731,98 @@ fn preferred_quote_rank(token_map: &HashMap<Address, TokenDef>, token: Address) 
         Some("ARB") => 4,
         _ => 100,
     }
+}
+
+fn is_directional_candidate(
+    candidate: &RoughCandidate,
+    quote_result: Option<&ExactQuoteResult>,
+) -> bool {
+    if let Some(result) = quote_result {
+        return result.amount_out > result.amount_in;
+    }
+
+    candidate
+        .local_quote
+        .as_ref()
+        .map(|quote| quote.gross_profit.is_finite() && quote.gross_profit > 0.0)
+        .unwrap_or(false)
+}
+
+fn info_directional_candidate(
+    candidate: &RoughCandidate,
+    token_map: &HashMap<Address, TokenDef>,
+    quote_result: Option<&ExactQuoteResult>,
+    execution_plan: Option<&ExecutionPlan>,
+    execution_source: &'static str,
+) {
+    let token = token_map
+        .get(&candidate.triangle.start_token)
+        .map(|token| token.symbol)
+        .unwrap_or("UNKNOWN");
+
+    info!(
+        triangle = candidate.triangle_label,
+        fees = candidate.fee_label,
+        start_token = token,
+        rough_edge_bps = format!("{:.2}", candidate.rough_edge_bps),
+        local_edge_bps = candidate
+            .local_quote
+            .as_ref()
+            .map(|quote| format!("{:.2}", quote.edge_bps))
+            .unwrap_or_else(|| "n/a".to_string()),
+        local_gross_profit = candidate
+            .local_quote
+            .as_ref()
+            .map(|quote| format_amount_f64(
+                quote.gross_profit,
+                token_map,
+                candidate.triangle.start_token
+            ))
+            .unwrap_or_else(|| "n/a".to_string()),
+        local_amount_in = candidate
+            .local_quote
+            .as_ref()
+            .map(|quote| format_amount_f64(
+                quote.amount_in,
+                token_map,
+                candidate.triangle.start_token
+            ))
+            .unwrap_or_else(|| "n/a".to_string()),
+        local_amount_out = candidate
+            .local_quote
+            .as_ref()
+            .map(|quote| format_amount_f64(
+                quote.amount_out,
+                token_map,
+                candidate.triangle.start_token
+            ))
+            .unwrap_or_else(|| "n/a".to_string()),
+        exact_edge_bps = quote_result
+            .map(|result| format!("{:.2}", exact_edge_bps(result)))
+            .unwrap_or_else(|| "n/a".to_string()),
+        exact_amount_out = quote_result
+            .map(|result| format_amount(
+                &result.amount_out,
+                token_map,
+                candidate.triangle.start_token
+            ))
+            .unwrap_or_else(|| "n/a".to_string()),
+        execution_source = execution_source,
+        execution_amount_in = execution_plan
+            .map(|plan| format_amount(&plan.amount_in, token_map, plan.loan_token))
+            .unwrap_or_else(|| "n/a".to_string()),
+        execution_amount_out_minimum = execution_plan
+            .map(|plan| format_amount(
+                &plan.amount_out_minimum,
+                token_map,
+                candidate.triangle.start_token
+            ))
+            .unwrap_or_else(|| "n/a".to_string()),
+        execution_calldata = execution_plan
+            .map(|plan| plan.calldata_hex())
+            .unwrap_or_else(|| "n/a".to_string()),
+        "directional candidate"
+    );
 }
 
 fn info_triangle(
@@ -1036,31 +1125,6 @@ fn format_amount_f64(
     } else {
         "n/a".to_string()
     }
-}
-
-fn format_profit_summary(
-    by_token: &HashMap<Address, MaxProfitObservation>,
-    token_map: &HashMap<Address, TokenDef>,
-) -> String {
-    let mut tokens: Vec<_> = by_token.keys().copied().collect();
-    tokens.sort_by_key(|token| preferred_quote_rank(token_map, *token));
-
-    tokens
-        .into_iter()
-        .filter_map(|token| {
-            let observation = by_token.get(&token)?;
-            let symbol = token_map
-                .get(&token)
-                .map(|def| def.symbol)
-                .unwrap_or("UNKNOWN");
-            Some(format!(
-                "{symbol}:{profit} via {triangle}",
-                profit = format_amount_f64(observation.gross_profit, token_map, token),
-                triangle = observation.triangle_label,
-            ))
-        })
-        .collect::<Vec<_>>()
-        .join(" | ")
 }
 
 fn u256_to_f64(value: &U256) -> f64 {
