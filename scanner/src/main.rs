@@ -533,6 +533,15 @@ async fn main() -> Result<()> {
     let mut live_receiver = watcher::spawn_live_pool_watcher(config.clone());
     let mut quote_throttle = QuoteThrottle::new();
     let mut execution_call_throttle = QuoteThrottle::new();
+    let live_logs_enabled = live_receiver.is_some();
+    let backfill_poll_interval = if live_logs_enabled {
+        config.ws_backfill_interval
+    } else {
+        config.poll_interval
+    };
+    let mut backfill_ticker = tokio::time::interval(backfill_poll_interval);
+    backfill_ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    backfill_ticker.tick().await;
     let mut directional_writer = if config.debug_summary_enabled {
         Some(DirectionalJsonlWriter::new(&config.debug_jsonl_path)?)
     } else {
@@ -545,8 +554,9 @@ async fn main() -> Result<()> {
             pools = config.pools.len(),
             triangles = graph.triangles.len(),
             poll_ms = config.poll_interval.as_millis(),
+            backfill_poll_ms = backfill_poll_interval.as_millis(),
             max_log_block_range = config.max_log_block_range,
-            ws_live_logs = config.log_ws_url.is_some(),
+            ws_live_logs = live_logs_enabled,
             rpc_retry_ms = config.rpc_retry_delay.as_millis(),
             min_candidate_edge_bps = format!("{:.2}", config.min_candidate_edge_bps),
             min_local_edge_bps = format!("{:.2}", config.min_local_edge_bps),
@@ -609,7 +619,7 @@ async fn main() -> Result<()> {
                     )
                 .await;
             }
-            _ = tokio::time::sleep(config.poll_interval) => {
+            _ = backfill_ticker.tick() => {
                 let latest_block = fetch_latest_block_with_retry(provider.clone(), config.rpc_retry_delay).await;
 
                 if latest_block < next_block {

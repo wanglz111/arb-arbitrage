@@ -52,6 +52,7 @@ pub struct ScannerConfig {
     pub log_ws_url: Option<String>,
     pub quote_rpc_url: String,
     pub poll_interval: Duration,
+    pub ws_backfill_interval: Duration,
     pub max_log_block_range: u64,
     pub ws_reconnect_delay: Duration,
     pub rpc_retry_delay: Duration,
@@ -94,6 +95,10 @@ impl ScannerConfig {
             .unwrap_or_else(|_| "1500".to_string())
             .parse::<u64>()
             .context("failed to parse SCANNER_POLL_MS")?;
+        let ws_backfill_interval_ms = env::var("SCANNER_WS_BACKFILL_POLL_MS")
+            .unwrap_or_else(|_| "60000".to_string())
+            .parse::<u64>()
+            .context("failed to parse SCANNER_WS_BACKFILL_POLL_MS")?;
         let max_log_block_range = env::var("SCANNER_MAX_LOG_BLOCK_RANGE")
             .unwrap_or_else(|_| "10".to_string())
             .parse::<u64>()
@@ -190,6 +195,7 @@ impl ScannerConfig {
             log_ws_url,
             quote_rpc_url,
             poll_interval: Duration::from_millis(poll_interval_ms),
+            ws_backfill_interval: Duration::from_millis(ws_backfill_interval_ms),
             max_log_block_range,
             ws_reconnect_delay: Duration::from_millis(ws_reconnect_delay_ms),
             rpc_retry_delay: Duration::from_millis(rpc_retry_delay_ms),

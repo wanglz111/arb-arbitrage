@@ -623,3 +623,14 @@ After this execution-handoff pass, the most natural next build steps are:
   - `cargo fmt --manifest-path scanner/Cargo.toml`
   - `cargo test --manifest-path scanner/Cargo.toml`
   - `cargo clippy --manifest-path scanner/Cargo.toml -- -D warnings`
+- Reduced HTTP polling cost when WebSocket log watching is enabled:
+  - new config:
+    - `SCANNER_WS_BACKFILL_POLL_MS`
+  - default is `60000`
+  - when `LOG_WS_URL` is set, live pool events are handled from the WS subscription and HTTP backfill uses the slower WS backfill interval
+  - when `LOG_WS_URL` is absent, the scanner still uses `SCANNER_POLL_MS` for normal HTTP polling
+  - this keeps an HTTP reconciliation path while removing `eth_blockNumber` from the hot event loop in WS mode
+- Validation completed for WS backfill throttling:
+  - `cargo fmt --manifest-path scanner/Cargo.toml`
+  - `cargo test --manifest-path scanner/Cargo.toml`
+  - `cargo clippy --manifest-path scanner/Cargo.toml -- -D warnings`
