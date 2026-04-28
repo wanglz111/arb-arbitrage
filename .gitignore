@@ -8,5 +8,6 @@ out/
 
 scanner/target/
 scanner/.git.codex-backup/
+scanner-image.env
 
 node_modules/

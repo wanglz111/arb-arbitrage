@@ -56,41 +56,44 @@ cargo test --manifest-path scanner/Cargo.toml
 forge test
 ```
 
-5. Optional: let `git push` run local checks first.
+5. Enable local hooks before making release commits.
 
 ```bash
 git config --local core.hooksPath .githooks
 ```
 
-The bundled `pre-push` hook runs:
+The bundled `pre-commit` hook runs:
 
 - `cargo clippy --manifest-path scanner/Cargo.toml -- -D warnings`
 - `cargo test --manifest-path scanner/Cargo.toml`
-- no local Docker build or push by default
+- Docker image build from the staged tree
+- scanner container smoke test
+- GHCR push to `tree-<staged-tree-hash>`, branch, and `latest` tags
+- writes `scanner-image.env` with the immutable image tag
 
 Useful overrides:
 
-- `git push --no-verify`
+- `GHCR_IMAGE=ghcr.io/<owner>/<repo> git commit`
+- `ARB_SKIP_GHCR_PUBLISH=1 git commit` for local-only commits
 
 ## Deployment
 
 The repo includes:
 
 - a Dockerfile for the Rust scanner
-- a GitHub Actions workflow that smoke-tests the image, then pushes GHCR tags including `latest` and immutable `sha-<commit>` refs
+- a local `pre-commit` hook that smoke-tests and pushes GHCR images
 - a `docker-compose.yml` that runs the scanner from a server-side `.env`
 
 Typical server flow:
 
 ```bash
 cp .env.example .env
-# set SCANNER_IMAGE=ghcr.io/<owner>/<repo>:sha-<full-commit-sha>
+# set SCANNER_IMAGE from scanner-image.env after a pre-commit image push
 docker compose up -d
 ```
 
 For reproducible deploys, copy the immutable `SCANNER_IMAGE=...` value from the
-`docker-image` workflow summary or `scanner-image.env` artifact instead of
-relying on `:latest`.
+local `scanner-image.env` file instead of relying on `:latest`.
 
 More details are in [DEPLOYMENT.md](/Users/edy/lucas/arb-arbitrage/DEPLOYMENT.md).
 

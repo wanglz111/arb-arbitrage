@@ -1,74 +1,71 @@
 # Deployment
 
-This repository is set up to build a scanner image on GitHub Actions, smoke-test
-it, and publish it to GHCR.
+This repository no longer builds or publishes scanner images through GitHub Actions.
+Image publication is intentionally local and explicit through `.githooks/pre-commit`.
 
-## Build Flow
+## Local Build Flow
 
-- Push to `main` or `master`
-- GitHub Actions runs:
-  - `cargo clippy --manifest-path scanner/Cargo.toml -- -D warnings`
-  - `cargo test --manifest-path scanner/Cargo.toml`
-  - a container smoke test that verifies the scanner starts and stays alive
-  - Docker build and push to GHCR
-- Published image refs include:
-  - `ghcr.io/<owner>/<repo>:latest` on the default branch
+Enable the repository hooks once:
+
+```bash
+git config --local core.hooksPath .githooks
+```
+
+Before each commit, the `pre-commit` hook:
+
+- runs scanner clippy with `-D warnings`
+- runs scanner tests
+- builds the Docker image from the staged git tree
+- smoke-tests the image
+- pushes GHCR tags:
+  - `ghcr.io/<owner>/<repo>:tree-<staged-tree-hash>`
   - `ghcr.io/<owner>/<repo>:<branch>`
-  - `ghcr.io/<owner>/<repo>:sha-<full-commit-sha>`
-- Each successful non-PR run also publishes:
-  - a workflow summary with the exact immutable tag and digest
-  - a `scanner-image.env` artifact containing ready-to-copy `SCANNER_IMAGE=...` values
+  - `ghcr.io/<owner>/<repo>:latest`
+- writes `scanner-image.env` with the immutable `SCANNER_IMAGE=...` tag
 
-## Server Setup
-
-1. Copy `.env.example` to `.env`.
-2. Fill in your RPC URLs and scanner env vars.
-3. Set `SCANNER_IMAGE` in `.env` to the immutable tag or digest from the latest successful `docker-image` workflow.
-
-Example:
+The hook infers the image name from the GitHub `origin` remote. Override it when needed:
 
 ```bash
-SCANNER_IMAGE=ghcr.io/wanglz111/arb-arbitrage:sha-<full-commit-sha>
+GHCR_IMAGE=ghcr.io/<owner>/<repo> git commit
 ```
 
-or
-
-```bash
-SCANNER_IMAGE=ghcr.io/wanglz111/arb-arbitrage@sha256:<image-digest>
-```
-
-If `SCANNER_IMAGE` is omitted, `docker-compose.yml` falls back to `ghcr.io/wanglz111/arb-arbitrage:latest`, which is convenient for ad hoc use but not ideal for production rollouts.
-4. If the repository or package is private, run:
+If GHCR auth is missing, log in first:
 
 ```bash
 docker login ghcr.io
 ```
 
-Use a GitHub token with at least `read:packages`.
+Use a GitHub token with `write:packages`.
 
-5. Start the scanner:
+For local-only commits that must not publish an image:
+
+```bash
+ARB_SKIP_GHCR_PUBLISH=1 git commit
+```
+
+## Server Setup
+
+1. Copy `.env.example` to `.env`.
+2. Fill in RPC URLs and scanner env vars.
+3. Copy `SCANNER_IMAGE=...` from local `scanner-image.env` into the server `.env`.
+
+Example:
+
+```bash
+SCANNER_IMAGE=ghcr.io/wanglz111/arb-arbitrage:tree-<staged-tree-hash>
+```
+
+4. Start or refresh the scanner:
 
 ```bash
 docker compose up -d
 ```
 
-Because `docker-compose.yml` uses `pull_policy: always`, re-running `docker compose up -d` will refresh the configured image before restart.
-
-## Recommended Rollout Flow
-
-1. Push the scanner change to `main` or `master`.
-2. Wait for the `docker-image` workflow to succeed.
-3. Copy the immutable `SCANNER_IMAGE=...` value from the workflow summary or `scanner-image.env` artifact into the server `.env`.
-4. Run `docker compose up -d`.
-5. Verify the container image and startup logs:
-
-```bash
-docker ps -a
-docker compose logs --tail=50 scanner
-```
+Because `docker-compose.yml` uses `pull_policy: always`, re-running `docker compose up -d` refreshes the configured image before restart.
 
 ## Notes
 
 - The Docker image only contains the Rust scanner binary.
-- The local `.env` file is excluded from both git and Docker build context.
-- This setup does not SSH-deploy into the server automatically. It prepares the image so the server can run it directly via Docker Compose.
+- The local `.env` file is excluded from git and Docker build context.
+- `scanner-image.env` is generated locally and ignored by git.
+- The staged tree hash is used because `pre-commit` runs before a final commit SHA exists.

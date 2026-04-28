@@ -1,0 +1,113 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+repo_root="$(git rev-parse --show-toplevel)"
+cd "$repo_root"
+
+if [ "${ARB_SKIP_GHCR_PUBLISH:-}" = "1" ]; then
+  echo "[pre-commit] ARB_SKIP_GHCR_PUBLISH=1, skipping scanner image build/push"
+  exit 0
+fi
+
+if git diff --cached --quiet; then
+  echo "[pre-commit] nothing staged"
+  exit 0
+fi
+
+for tool in cargo docker timeout git; do
+  if ! command -v "$tool" >/dev/null 2>&1; then
+    echo "[pre-commit] missing required tool: $tool" >&2
+    exit 1
+  fi
+done
+
+remote_url="$(git remote get-url origin 2>/dev/null || true)"
+default_image=""
+case "$remote_url" in
+  git@github.com:*)
+    default_image="${remote_url#git@github.com:}"
+    default_image="${default_image%.git}"
+    ;;
+  https://github.com/*)
+    default_image="${remote_url#https://github.com/}"
+    default_image="${default_image%.git}"
+    ;;
+esac
+
+if [ -n "$default_image" ]; then
+  default_image="ghcr.io/${default_image,,}"
+fi
+
+image="${GHCR_IMAGE:-$default_image}"
+if [ -z "$image" ]; then
+  echo "[pre-commit] cannot infer GHCR image from origin; set GHCR_IMAGE=ghcr.io/<owner>/<repo>" >&2
+  exit 1
+fi
+
+tree_hash="$(git write-tree)"
+tree_tag="tree-${tree_hash:0:12}"
+branch="$(git symbolic-ref --quiet --short HEAD 2>/dev/null || echo detached)"
+branch_tag="$(printf '%s' "$branch" | tr '/:@ ' '----' | tr -cd '[:alnum:]_.-')"
+created_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+
+immutable_tag="${image}:${tree_tag}"
+branch_image_tag="${image}:${branch_tag}"
+latest_tag="${image}:latest"
+
+echo "[pre-commit] running scanner lint"
+RUSTUP_TOOLCHAIN="${RUSTUP_TOOLCHAIN:-stable}" cargo clippy --manifest-path scanner/Cargo.toml -- -D warnings
+
+echo "[pre-commit] running scanner tests"
+RUSTUP_TOOLCHAIN="${RUSTUP_TOOLCHAIN:-stable}" cargo test --manifest-path scanner/Cargo.toml
+
+echo "[pre-commit] building scanner image from staged tree ${tree_hash}"
+git archive --format=tar "$tree_hash" | docker build \
+  --build-arg "SCANNER_BUILD_GIT_SHA=tree-${tree_hash}" \
+  --build-arg "SCANNER_BUILD_GIT_REF=${branch}" \
+  --build-arg "SCANNER_BUILD_CREATED=${created_at}" \
+  -t "$immutable_tag" \
+  -t "$branch_image_tag" \
+  -t "$latest_tag" \
+  -
+
+echo "[pre-commit] smoke testing ${immutable_tag}"
+log_file="$(mktemp)"
+set +e
+timeout 10s docker run --rm \
+  -e HTTP_RPC_URL=http://127.0.0.1:9 \
+  -e LOG_RPC_URL=http://127.0.0.1:9 \
+  -e QUOTE_RPC_URL=http://127.0.0.1:9 \
+  -e SCANNER_RPC_RETRY_MS=50 \
+  -e SCANNER_POLL_MS=500 \
+  "$immutable_tag" >"$log_file" 2>&1
+status=$?
+set -e
+
+if [ "$status" -ne 124 ]; then
+  cat "$log_file"
+  echo "[pre-commit] scanner container exited unexpectedly during smoke test" >&2
+  exit 1
+fi
+grep -q "scanner starting" "$log_file"
+grep -q "failed to fetch latest block, retrying" "$log_file"
+rm -f "$log_file"
+
+echo "[pre-commit] pushing ${immutable_tag}"
+docker push "$immutable_tag"
+
+echo "[pre-commit] pushing ${branch_image_tag}"
+docker push "$branch_image_tag"
+
+echo "[pre-commit] pushing ${latest_tag}"
+docker push "$latest_tag"
+
+cat > scanner-image.env <<EOF
+SCANNER_IMAGE=${immutable_tag}
+SCANNER_IMAGE_BRANCH=${branch_image_tag}
+SCANNER_IMAGE_LATEST=${latest_tag}
+SCANNER_IMAGE_TREE=${tree_hash}
+SCANNER_IMAGE_CREATED=${created_at}
+EOF
+
+echo "[pre-commit] wrote scanner-image.env"
+echo "[pre-commit] committed image tag: ${immutable_tag}"

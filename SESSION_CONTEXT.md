@@ -23,6 +23,17 @@ Current implementation baseline before this round:
 - Local V3 simulation can cross multiple loaded initialized ticks using local liquidity changes.
 - Execution calldata can be generated for the current `TriangleArb.execute(uint256,uint256,bytes)` contract path.
 
+Checkpoint commits:
+
+- `64f27ab Add pool liquidity events and multi-tick simulation`
+
+Packaging decision made this round:
+
+- GitHub Actions image workflow is removed.
+- `.githooks/pre-commit` is the local image publisher.
+- Pre-commit builds from the staged git tree and tags images as `tree-<staged-tree-hash>` because final commit SHA is not available before commit creation.
+- Pre-commit writes local `scanner-image.env`; the file is gitignored.
+
 ## Objective
 
 Build a local-first triangle arbitrage system on Arbitrum with these priorities:
