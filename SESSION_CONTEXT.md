@@ -611,3 +611,15 @@ After this execution-handoff pass, the most natural next build steps are:
   - `cargo fmt --manifest-path scanner/Cargo.toml`
   - `cargo test --manifest-path scanner/Cargo.toml`
   - `cargo clippy --manifest-path scanner/Cargo.toml -- -D warnings`
+- Added an economic emission threshold:
+  - new config:
+    - `SCANNER_MIN_PROFIT_USD`
+  - default is `1`, matching the MVP rule of only emitting candidates above roughly `1U` gross profit
+  - `TokenDef` now carries a static `usd_price_hint` for local gross-profit filtering
+  - debug JSONL and directional logs now include local/exact profit estimates in USD
+  - candidate ranking now prefers estimated USD profit instead of raw bps when local simulation is available
+  - exact quote and executor call remain rate-limited and optional, so this filter costs no extra RPC
+- Validation completed for the profit-threshold change:
+  - `cargo fmt --manifest-path scanner/Cargo.toml`
+  - `cargo test --manifest-path scanner/Cargo.toml`
+  - `cargo clippy --manifest-path scanner/Cargo.toml -- -D warnings`

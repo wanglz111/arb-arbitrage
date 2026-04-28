@@ -140,6 +140,7 @@ impl DirectionalJsonlWriter {
                 "amount_in": format_amount_f64(quote.amount_in, token_map, candidate.triangle.start_token),
                 "amount_out": format_amount_f64(quote.amount_out, token_map, candidate.triangle.start_token),
                 "gross_profit": format_amount_f64(quote.gross_profit, token_map, candidate.triangle.start_token),
+                "gross_profit_usd": local_profit_usd(candidate, token_map),
                 "edge_bps": quote.edge_bps,
                 "size_bps": quote.size_bps,
                 "crosses_tick": quote.crosses_tick,
@@ -152,6 +153,7 @@ impl DirectionalJsonlWriter {
                 "amount_in": quote.amount_in.to_string(),
                 "amount_out": quote.amount_out.to_string(),
                 "edge_bps": exact_edge_bps(quote),
+                "profit_usd": exact_profit_usd(quote, token_map, candidate.triangle.start_token),
                 "gas_estimate": quote.gas_estimate.to_string(),
             })),
             "execution": emission.execution_plan.map(|plan| json!({
@@ -373,7 +375,12 @@ impl<'a> CandidateProcessor<'a> {
             let execution_plan = exact_execution_plan
                 .as_ref()
                 .or(local_execution_plan.as_ref());
-            let directional_candidate = is_directional_candidate(&candidate, quote_result.as_ref());
+            let directional_candidate = is_directional_candidate(
+                &candidate,
+                self.token_map,
+                quote_result.as_ref(),
+                self.config.min_profit_usd,
+            );
             let execution_call_report = if directional_candidate {
                 self.maybe_simulate_execution_call(
                     &candidate,
@@ -543,6 +550,7 @@ async fn main() -> Result<()> {
             rpc_retry_ms = config.rpc_retry_delay.as_millis(),
             min_candidate_edge_bps = format!("{:.2}", config.min_candidate_edge_bps),
             min_local_edge_bps = format!("{:.2}", config.min_local_edge_bps),
+            min_profit_usd = format!("{:.2}", config.min_profit_usd),
             rough_shortlist_size = config.rough_shortlist_size,
             local_size_bps = format_size_bps_list(&config.local_size_bps),
             exact_quote_enabled = config.exact_quote_enabled,
@@ -867,8 +875,11 @@ fn build_shortlist(
 
                     if let Some(local_quote) = &candidate.local_quote
                         && !passes_local_candidate_filter(
+                            &candidate,
                             local_quote,
+                            token_map,
                             config.min_local_edge_bps,
+                            config.min_profit_usd,
                             config.exact_quote_enabled,
                         )
                     {
@@ -891,8 +902,8 @@ fn build_shortlist(
 
     let mut candidates: Vec<_> = best_by_key.into_values().collect();
     candidates.sort_by(|left, right| {
-        candidate_score(right)
-            .partial_cmp(&candidate_score(left))
+        candidate_score(right, token_map)
+            .partial_cmp(&candidate_score(left, token_map))
             .unwrap_or(std::cmp::Ordering::Equal)
             .then_with(|| {
                 preferred_quote_rank(token_map, left.triangle.start_token)
@@ -910,8 +921,8 @@ fn prefer_candidate(
 ) -> bool {
     let candidate_rank = preferred_quote_rank(token_map, candidate.triangle.start_token);
     let existing_rank = preferred_quote_rank(token_map, existing.triangle.start_token);
-    let candidate_edge = candidate_score(candidate);
-    let existing_edge = candidate_score(existing);
+    let candidate_edge = candidate_score(candidate, token_map);
+    let existing_edge = candidate_score(existing, token_map);
 
     candidate_rank < existing_rank
         || (candidate_rank == existing_rank && candidate_edge > existing_edge)
@@ -931,16 +942,19 @@ fn preferred_quote_rank(token_map: &HashMap<Address, TokenDef>, token: Address) 
 
 fn is_directional_candidate(
     candidate: &RoughCandidate,
+    token_map: &HashMap<Address, TokenDef>,
     quote_result: Option<&ExactQuoteResult>,
+    min_profit_usd: f64,
 ) -> bool {
     if let Some(result) = quote_result {
-        return result.amount_out > result.amount_in;
+        return result.amount_out > result.amount_in
+            && exact_profit_usd(result, token_map, candidate.triangle.start_token)
+                .map(|profit| profit > 0.0 && profit >= min_profit_usd)
+                .unwrap_or(false);
     }
 
-    candidate
-        .local_quote
-        .as_ref()
-        .map(|quote| quote.gross_profit.is_finite() && quote.gross_profit > 0.0)
+    local_profit_usd(candidate, token_map)
+        .map(|profit| profit > 0.0 && profit >= min_profit_usd)
         .unwrap_or(false)
 }
 
@@ -976,6 +990,9 @@ fn info_directional_candidate(
                 candidate.triangle.start_token
             ))
             .unwrap_or_else(|| "n/a".to_string()),
+        local_gross_profit_usd = local_profit_usd(candidate, token_map)
+            .map(|profit| format!("{profit:.4}"))
+            .unwrap_or_else(|| "n/a".to_string()),
         local_amount_in = candidate
             .local_quote
             .as_ref()
@@ -996,6 +1013,10 @@ fn info_directional_candidate(
             .unwrap_or_else(|| "n/a".to_string()),
         exact_edge_bps = quote_result
             .map(|result| format!("{:.2}", exact_edge_bps(result)))
+            .unwrap_or_else(|| "n/a".to_string()),
+        exact_profit_usd = quote_result
+            .and_then(|result| exact_profit_usd(result, token_map, candidate.triangle.start_token))
+            .map(|profit| format!("{profit:.4}"))
             .unwrap_or_else(|| "n/a".to_string()),
         exact_amount_out = quote_result
             .map(|result| format_amount(
@@ -1095,6 +1116,9 @@ fn info_triangle(
                     candidate.triangle.start_token
                 ))
                 .unwrap_or_else(|| "n/a".to_string()),
+            local_gross_profit_usd = local_profit_usd(candidate, token_map)
+                .map(|profit| format!("{profit:.4}"))
+                .unwrap_or_else(|| "n/a".to_string()),
             local_size_bps = candidate
                 .local_quote
                 .as_ref()
@@ -1111,6 +1135,9 @@ fn info_triangle(
                 .map(|quote| quote.refinement_samples)
                 .unwrap_or_default(),
             exact_edge_bps = format!("{:.2}", exact_edge_bps(result)),
+            exact_profit_usd = exact_profit_usd(result, token_map, candidate.triangle.start_token)
+                .map(|profit| format!("{profit:.4}"))
+                .unwrap_or_else(|| "n/a".to_string()),
             amount_in = format_amount(&result.amount_in, token_map, candidate.triangle.start_token),
             amount_out = format_amount(
                 &result.amount_out,
@@ -1217,6 +1244,9 @@ fn info_triangle(
                 candidate.triangle.start_token
             ))
             .unwrap_or_else(|| "n/a".to_string()),
+        local_gross_profit_usd = local_profit_usd(candidate, token_map)
+            .map(|profit| format!("{profit:.4}"))
+            .unwrap_or_else(|| "n/a".to_string()),
         local_size_bps = candidate
             .local_quote
             .as_ref()
@@ -1287,8 +1317,11 @@ fn should_exact_quote(candidate: &RoughCandidate, min_local_edge_bps: f64) -> bo
 }
 
 fn passes_local_candidate_filter(
+    candidate: &RoughCandidate,
     quote: &LocalQuoteResult,
+    token_map: &HashMap<Address, TokenDef>,
     min_local_edge_bps: f64,
+    min_profit_usd: f64,
     exact_quote_enabled: bool,
 ) -> bool {
     if exact_quote_enabled && quote.crosses_tick {
@@ -1296,14 +1329,13 @@ fn passes_local_candidate_filter(
     }
 
     quote.edge_bps >= min_local_edge_bps
+        && local_profit_usd(candidate, token_map)
+            .map(|profit| profit > 0.0 && profit >= min_profit_usd)
+            .unwrap_or(false)
 }
 
-fn candidate_score(candidate: &RoughCandidate) -> f64 {
-    candidate
-        .local_quote
-        .as_ref()
-        .map(|quote| quote.edge_bps)
-        .unwrap_or(candidate.rough_edge_bps)
+fn candidate_score(candidate: &RoughCandidate, token_map: &HashMap<Address, TokenDef>) -> f64 {
+    local_profit_usd(candidate, token_map).unwrap_or(candidate.rough_edge_bps)
 }
 
 fn exact_edge_bps(result: &ExactQuoteResult) -> f64 {
@@ -1314,6 +1346,37 @@ fn exact_edge_bps(result: &ExactQuoteResult) -> f64 {
     let amount_in = u256_to_f64(&result.amount_in);
     let amount_out = u256_to_f64(&result.amount_out);
     ((amount_out / amount_in) - 1.0) * 10_000.0
+}
+
+fn local_profit_usd(
+    candidate: &RoughCandidate,
+    token_map: &HashMap<Address, TokenDef>,
+) -> Option<f64> {
+    let quote = candidate.local_quote.as_ref()?;
+    amount_raw_to_usd(
+        quote.gross_profit,
+        token_map,
+        candidate.triangle.start_token,
+    )
+}
+
+fn exact_profit_usd(
+    result: &ExactQuoteResult,
+    token_map: &HashMap<Address, TokenDef>,
+    token: Address,
+) -> Option<f64> {
+    let profit_raw = u256_to_f64(&result.amount_out) - u256_to_f64(&result.amount_in);
+    amount_raw_to_usd(profit_raw, token_map, token)
+}
+
+fn amount_raw_to_usd(
+    amount_raw: f64,
+    token_map: &HashMap<Address, TokenDef>,
+    token: Address,
+) -> Option<f64> {
+    let token = token_map.get(&token)?;
+    let units = amount_raw / 10f64.powi(i32::from(token.decimals));
+    (units.is_finite() && token.usd_price_hint.is_finite()).then_some(units * token.usd_price_hint)
 }
 
 fn execution_call_json(report: &ExecutionCallReport) -> serde_json::Value {

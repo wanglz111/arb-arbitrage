@@ -112,6 +112,7 @@ More details are in [DEPLOYMENT.md](/Users/edy/lucas/arb-arbitrage/DEPLOYMENT.md
 - hot path should not depend on exact quote RPC
 - Alchemy should be treated as a scarce resource, with an effective target budget around `20M CUs / month`
 - debug mode is quiet by default and only emits directional candidates, also saved as JSONL
+- default candidate emission requires at least `SCANNER_MIN_PROFIT_USD=1` estimated gross profit
 - executor `eth_call` confirmation is optional and rate-limited; enable it only after `RouteArb` is deployed and `SCANNER_EXECUTOR_ADDRESS` / `SCANNER_EXECUTOR_CALLER` are set
 
 ## Next Steps

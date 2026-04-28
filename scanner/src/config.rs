@@ -9,6 +9,7 @@ pub struct TokenDef {
     pub address: Address,
     pub decimals: u8,
     pub quote_amount_in: u128,
+    pub usd_price_hint: f64,
 }
 
 #[derive(Clone, Debug)]
@@ -56,6 +57,7 @@ pub struct ScannerConfig {
     pub rpc_retry_delay: Duration,
     pub min_candidate_edge_bps: f64,
     pub min_local_edge_bps: f64,
+    pub min_profit_usd: f64,
     pub rough_shortlist_size: usize,
     pub local_size_bps: Vec<u32>,
     pub exact_quote_enabled: bool,
@@ -112,6 +114,10 @@ impl ScannerConfig {
             .unwrap_or_else(|_| "0".to_string())
             .parse::<f64>()
             .context("failed to parse SCANNER_MIN_LOCAL_EDGE_BPS")?;
+        let min_profit_usd = env::var("SCANNER_MIN_PROFIT_USD")
+            .unwrap_or_else(|_| "1".to_string())
+            .parse::<f64>()
+            .context("failed to parse SCANNER_MIN_PROFIT_USD")?;
         let rough_shortlist_size = env::var("SCANNER_ROUGH_SHORTLIST_SIZE")
             .unwrap_or_else(|_| "5".to_string())
             .parse::<usize>()
@@ -189,6 +195,7 @@ impl ScannerConfig {
             rpc_retry_delay: Duration::from_millis(rpc_retry_delay_ms),
             min_candidate_edge_bps,
             min_local_edge_bps,
+            min_profit_usd,
             rough_shortlist_size,
             local_size_bps,
             exact_quote_enabled,
@@ -231,36 +238,42 @@ fn core_tokens() -> Vec<TokenDef> {
             address: addr("0xaf88d065e77c8cC2239327C5EDb3A432268e5831"),
             decimals: 6,
             quote_amount_in: 1_000_000_000,
+            usd_price_hint: 1.0,
         },
         TokenDef {
             symbol: "USDT0",
             address: addr("0xFd086bC7CD5C481DCC9C85ebE478A1C0b69FCbb9"),
             decimals: 6,
             quote_amount_in: 1_000_000_000,
+            usd_price_hint: 1.0,
         },
         TokenDef {
             symbol: "WETH",
             address: addr("0x82aF49447D8a07e3bd95BD0d56f35241523fBab1"),
             decimals: 18,
             quote_amount_in: 500_000_000_000_000_000,
+            usd_price_hint: 3_000.0,
         },
         TokenDef {
             symbol: "WBTC",
             address: addr("0x2f2a2543B76A4166549F7aaB2e75Bef0aefC5B0f"),
             decimals: 8,
             quote_amount_in: 2_000_000,
+            usd_price_hint: 100_000.0,
         },
         TokenDef {
             symbol: "cbBTC",
             address: addr("0xcbB7C0000aB88B473b1f5aFd9ef808440eed33Bf"),
             decimals: 8,
             quote_amount_in: 2_000_000,
+            usd_price_hint: 100_000.0,
         },
         TokenDef {
             symbol: "ARB",
             address: addr("0x912CE59144191C1204E64559FE8253a0e49E6548"),
             decimals: 18,
             quote_amount_in: 1_000_000_000_000_000_000_000,
+            usd_price_hint: 1.0,
         },
     ]
 }

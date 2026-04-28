@@ -700,6 +700,7 @@ mod tests {
             address,
             decimals,
             quote_amount_in,
+            usd_price_hint: 1.0,
         }
     }
 
