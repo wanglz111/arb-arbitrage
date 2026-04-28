@@ -20,7 +20,7 @@ Working pieces today:
 - rough scoring plus local coarse+refine size search
 - multi-tick local Uniswap v3 simulation across loaded initialized ticks
 - fast local execution calldata construction
-- Solidity flash-loan executor and fork smoke tests
+- generic Solidity route executor and fork smoke tests
 - Docker image build and `docker compose` deployment path
 
 What is not finished yet:
@@ -100,7 +100,7 @@ More details are in [DEPLOYMENT.md](/Users/edy/lucas/arb-arbitrage/DEPLOYMENT.md
 ## Repo Layout
 
 - [scanner/](/Users/edy/lucas/arb-arbitrage/scanner): Rust event-driven scanner
-- [src/](/Users/edy/lucas/arb-arbitrage/src): Solidity executor contract
+- [src/](/Users/edy/lucas/arb-arbitrage/src): Solidity route executor contracts
 - [test/](/Users/edy/lucas/arb-arbitrage/test): Foundry fork and flash-loan tests
 - [ARCHITECTURE.md](/Users/edy/lucas/arb-arbitrage/ARCHITECTURE.md): design notes
 - [SESSION_CONTEXT.md](/Users/edy/lucas/arb-arbitrage/SESSION_CONTEXT.md): current working context and decisions

@@ -42,6 +42,14 @@ Quiet debug mode decision:
 - Directional candidates are appended to `SCANNER_DEBUG_JSONL_PATH`, defaulting to `data/directional-candidates.jsonl`.
 - Docker Compose mounts `./data:/app/data` so the JSONL output is retained outside the scanner container.
 
+Executor decision:
+
+- Added `RouteArb` as the generic Morpho + Uniswap V3 route executor.
+- `RouteArb.execute(...)` accepts 3-5 hop closed V3 paths.
+- `RouteArb.setRoute(...)` plus `executeRoute(...)` supports route-id triggered execution to reduce calldata once routes are preloaded.
+- `TriangleArb` is now a compatibility wrapper over `RouteArb`.
+- Unit coverage verifies route storage, closed-path validation, hop-count validation, and owner-only route writes.
+
 ## Objective
 
 Build a local-first triangle arbitrage system on Arbitrum with these priorities:
