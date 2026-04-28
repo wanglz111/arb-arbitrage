@@ -115,6 +115,7 @@ More details are in [DEPLOYMENT.md](/Users/edy/lucas/arb-arbitrage/DEPLOYMENT.md
 - debug mode is quiet by default and only emits directional candidates, also saved as JSONL
 - default candidate emission requires at least `SCANNER_MIN_PROFIT_USD=1` estimated gross profit
 - executor `eth_call` confirmation is optional and rate-limited; enable it only after `RouteArb` is deployed and `SCANNER_EXECUTOR_ADDRESS` / `SCANNER_EXECUTOR_CALLER` are set
+- `RouteArb` constructor expects Balancer Vault `0xBA12222222228d8Ba445958a75a0704d566BF2C8` as its first argument on Arbitrum
 
 ## Next Steps
 
