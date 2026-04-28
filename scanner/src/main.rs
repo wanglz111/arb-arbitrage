@@ -1,5 +1,6 @@
 mod config;
 mod execute;
+mod execution_call;
 mod graph;
 mod path;
 mod quote;
@@ -28,6 +29,7 @@ use tracing::{info, warn};
 use crate::{
     config::{ScannerConfig, TokenDef},
     execute::{ExecutionBuilder, ExecutionPlan, RouteCatalogEntry},
+    execution_call::{ExecutionCallReport, ExecutionCallSimulator},
     graph::TriangleGraph,
     quote::{ExactQuoteResult, QuoteEngine},
     simulate::LocalQuoteResult,
@@ -81,6 +83,16 @@ struct DirectionalJsonlWriter {
     writer: BufWriter<File>,
 }
 
+struct CandidateEmission<'a> {
+    candidate: &'a RoughCandidate,
+    token_map: &'a HashMap<Address, TokenDef>,
+    quote_result: Option<&'a ExactQuoteResult>,
+    execution_plan: Option<&'a ExecutionPlan>,
+    execution_source: &'static str,
+    execution_call: Option<&'a ExecutionCallReport>,
+    block_number: u64,
+}
+
 impl DirectionalJsonlWriter {
     fn new(path: &PathBuf) -> Result<Self> {
         if let Some(parent) = path.parent()
@@ -101,17 +113,11 @@ impl DirectionalJsonlWriter {
         })
     }
 
-    fn write_candidate(
-        &mut self,
-        candidate: &RoughCandidate,
-        token_map: &HashMap<Address, TokenDef>,
-        quote_result: Option<&ExactQuoteResult>,
-        execution_plan: Option<&ExecutionPlan>,
-        execution_source: &'static str,
-        block_number: u64,
-    ) -> Result<()> {
+    fn write_candidate(&mut self, emission: &CandidateEmission<'_>) -> Result<()> {
+        let candidate = emission.candidate;
+        let token_map = emission.token_map;
         let start_token = token_map
-            .get(&candidate.triangle.start_token)
+            .get(&emission.candidate.triangle.start_token)
             .map(|token| token.symbol)
             .unwrap_or("UNKNOWN");
         let local_quote = candidate.local_quote.as_ref();
@@ -122,7 +128,7 @@ impl DirectionalJsonlWriter {
 
         let record = json!({
             "ts_ms": now_ms,
-            "block_number": block_number,
+            "block_number": emission.block_number,
             "triangle": candidate.triangle_label,
             "fees": candidate.fee_label,
             "start_token": start_token,
@@ -142,14 +148,14 @@ impl DirectionalJsonlWriter {
                 "search_samples": quote.search_samples,
                 "refinement_samples": quote.refinement_samples,
             })),
-            "exact": quote_result.map(|quote| json!({
+            "exact": emission.quote_result.map(|quote| json!({
                 "amount_in": quote.amount_in.to_string(),
                 "amount_out": quote.amount_out.to_string(),
                 "edge_bps": exact_edge_bps(quote),
                 "gas_estimate": quote.gas_estimate.to_string(),
             })),
-            "execution": execution_plan.map(|plan| json!({
-                "source": execution_source,
+            "execution": emission.execution_plan.map(|plan| json!({
+                "source": emission.execution_source,
                 "route_id": plan.route_id.to_string(),
                 "loan_token": token_map
                     .get(&plan.loan_token)
@@ -165,6 +171,7 @@ impl DirectionalJsonlWriter {
                 "calldata_bytes": plan.execute_calldata.len(),
                 "route_calldata_bytes": plan.execute_route_calldata.len(),
             })),
+            "execution_call": emission.execution_call.map(execution_call_json),
         });
 
         serde_json::to_writer(&mut self.writer, &record)
@@ -183,6 +190,7 @@ struct CandidateProcessor<'a> {
     token_map: &'a HashMap<Address, TokenDef>,
     quote_engine: &'a Option<QuoteEngine>,
     execution_builder: &'a ExecutionBuilder,
+    execution_call_simulator: &'a Option<ExecutionCallSimulator>,
 }
 
 impl<'a> CandidateProcessor<'a> {
@@ -192,6 +200,7 @@ impl<'a> CandidateProcessor<'a> {
         state: &mut ScannerState,
         event: PoolStateEvent,
         quote_throttle: &mut QuoteThrottle,
+        execution_call_throttle: &mut QuoteThrottle,
         directional_writer: &mut Option<DirectionalJsonlWriter>,
     ) {
         let pool_address = event.pool();
@@ -264,6 +273,7 @@ impl<'a> CandidateProcessor<'a> {
             &changed_pools,
             block_number,
             quote_throttle,
+            execution_call_throttle,
             directional_writer,
         )
         .await;
@@ -275,6 +285,7 @@ impl<'a> CandidateProcessor<'a> {
         changed_pools: &HashSet<Address>,
         block_number: u64,
         quote_throttle: &mut QuoteThrottle,
+        execution_call_throttle: &mut QuoteThrottle,
         directional_writer: &mut Option<DirectionalJsonlWriter>,
     ) {
         let shortlist = build_shortlist(
@@ -362,26 +373,45 @@ impl<'a> CandidateProcessor<'a> {
             let execution_plan = exact_execution_plan
                 .as_ref()
                 .or(local_execution_plan.as_ref());
+            let directional_candidate = is_directional_candidate(&candidate, quote_result.as_ref());
+            let execution_call_report = if directional_candidate {
+                self.maybe_simulate_execution_call(
+                    &candidate,
+                    execution_plan,
+                    block_number,
+                    execution_call_throttle,
+                )
+                .await
+            } else {
+                None
+            };
+            let passes_execution_call_requirement = !self.config.require_execution_call
+                || execution_call_report
+                    .as_ref()
+                    .map(|report| report.success)
+                    .unwrap_or(false);
 
             if self.config.debug_summary_enabled {
-                if is_directional_candidate(&candidate, quote_result.as_ref()) {
+                if directional_candidate && passes_execution_call_requirement {
                     info_directional_candidate(
                         &candidate,
                         self.token_map,
                         quote_result.as_ref(),
                         execution_plan,
                         execution_source,
+                        execution_call_report.as_ref(),
                     );
 
                     if let Some(writer) = directional_writer
-                        && let Err(error) = writer.write_candidate(
-                            &candidate,
-                            self.token_map,
-                            quote_result.as_ref(),
+                        && let Err(error) = writer.write_candidate(&CandidateEmission {
+                            candidate: &candidate,
+                            token_map: self.token_map,
+                            quote_result: quote_result.as_ref(),
                             execution_plan,
                             execution_source,
+                            execution_call: execution_call_report.as_ref(),
                             block_number,
-                        )
+                        })
                     {
                         warn!(error = %error, "failed to write directional candidate jsonl");
                     }
@@ -393,10 +423,48 @@ impl<'a> CandidateProcessor<'a> {
                     quote_result.as_ref(),
                     execution_plan,
                     execution_source,
+                    execution_call_report.as_ref(),
                     self.config.log_execution_calldata,
                 );
             }
         }
+    }
+
+    async fn maybe_simulate_execution_call(
+        &self,
+        candidate: &RoughCandidate,
+        execution_plan: Option<&ExecutionPlan>,
+        block_number: u64,
+        execution_call_throttle: &mut QuoteThrottle,
+    ) -> Option<ExecutionCallReport> {
+        if !self.config.execution_call_enabled {
+            return None;
+        }
+
+        let Some(simulator) = self.execution_call_simulator.as_ref() else {
+            return Some(ExecutionCallReport::skipped("simulator_unavailable"));
+        };
+        let Some(plan) = execution_plan else {
+            return Some(ExecutionCallReport::skipped("missing_execution_plan"));
+        };
+        if !execution_call_throttle.should_quote(
+            block_number,
+            &candidate.canonical_key,
+            self.config.max_execution_calls_per_block,
+        ) {
+            return Some(ExecutionCallReport::skipped("block_budget_exhausted"));
+        }
+
+        let report = simulator.simulate(plan).await;
+        if !report.success && !self.config.debug_summary_enabled {
+            warn!(
+                triangle = candidate.triangle_label,
+                mode = report.mode.map(|mode| mode.as_str()).unwrap_or("n/a"),
+                error = report.error.as_deref().unwrap_or("n/a"),
+                "execution eth_call failed"
+            );
+        }
+        Some(report)
     }
 }
 
@@ -420,10 +488,24 @@ async fn main() -> Result<()> {
     let provider = Arc::new(build_provider(&config.rpc_url)?);
     let log_provider = Arc::new(build_provider(&config.log_rpc_url)?);
     let quote_provider = Arc::new(build_provider(&config.quote_rpc_url)?);
+    let execution_call_provider = Arc::new(build_provider(&config.execution_call_rpc_url)?);
     let quote_engine = if config.exact_quote_enabled {
         Some(QuoteEngine::new(quote_provider)?)
     } else {
         None
+    };
+    let execution_call_simulator = match (
+        config.execution_call_enabled,
+        config.executor_address,
+        config.executor_caller,
+    ) {
+        (true, Some(executor), Some(caller)) => Some(ExecutionCallSimulator::new(
+            execution_call_provider,
+            executor,
+            caller,
+            config.execution_call_mode,
+        )),
+        _ => None,
     };
     let execution_builder = ExecutionBuilder::new(&graph.triangles, config.execution_slippage_bps)?;
     write_route_catalog(
@@ -439,9 +521,11 @@ async fn main() -> Result<()> {
         token_map: &token_map,
         quote_engine: &quote_engine,
         execution_builder: &execution_builder,
+        execution_call_simulator: &execution_call_simulator,
     };
     let mut live_receiver = watcher::spawn_live_pool_watcher(config.clone());
     let mut quote_throttle = QuoteThrottle::new();
+    let mut execution_call_throttle = QuoteThrottle::new();
     let mut directional_writer = if config.debug_summary_enabled {
         Some(DirectionalJsonlWriter::new(&config.debug_jsonl_path)?)
     } else {
@@ -465,6 +549,10 @@ async fn main() -> Result<()> {
             max_exact_quotes_per_block = config.max_exact_quotes_per_block,
             execution_slippage_bps = config.execution_slippage_bps,
             log_execution_calldata = config.log_execution_calldata,
+            execution_call_enabled = config.execution_call_enabled,
+            require_execution_call = config.require_execution_call,
+            execution_call_mode = config.execution_call_mode.as_str(),
+            max_execution_calls_per_block = config.max_execution_calls_per_block,
             debug_summary_enabled = config.debug_summary_enabled,
             debug_jsonl_path = %config.debug_jsonl_path.display(),
             tracked_reserve_hint_usd = format!("{tracked_reserve_hint_usd:.0}"),
@@ -508,6 +596,7 @@ async fn main() -> Result<()> {
                         &mut state,
                         event,
                         &mut quote_throttle,
+                        &mut execution_call_throttle,
                         &mut directional_writer,
                     )
                 .await;
@@ -571,6 +660,7 @@ async fn main() -> Result<()> {
                             &mut state,
                             event,
                             &mut quote_throttle,
+                            &mut execution_call_throttle,
                             &mut directional_writer,
                         )
                         .await;
@@ -860,6 +950,7 @@ fn info_directional_candidate(
     quote_result: Option<&ExactQuoteResult>,
     execution_plan: Option<&ExecutionPlan>,
     execution_source: &'static str,
+    execution_call: Option<&ExecutionCallReport>,
 ) {
     let token = token_map
         .get(&candidate.triangle.start_token)
@@ -930,6 +1021,9 @@ fn info_directional_candidate(
         execution_route_calldata = execution_plan
             .map(|plan| plan.route_calldata_hex())
             .unwrap_or_else(|| "n/a".to_string()),
+        execution_call_status = format_execution_call_status(execution_call),
+        execution_call_mode = format_execution_call_mode(execution_call),
+        execution_call_error = format_execution_call_error(execution_call),
         "directional candidate"
     );
 }
@@ -940,6 +1034,7 @@ fn info_triangle(
     quote_result: Option<&ExactQuoteResult>,
     execution_plan: Option<&ExecutionPlan>,
     execution_source: &'static str,
+    execution_call: Option<&ExecutionCallReport>,
     log_execution_calldata: bool,
 ) {
     let token = token_map
@@ -1061,6 +1156,9 @@ fn info_triangle(
             } else {
                 "disabled".to_string()
             },
+            execution_call_status = format_execution_call_status(execution_call),
+            execution_call_mode = format_execution_call_mode(execution_call),
+            execution_call_error = format_execution_call_error(execution_call),
             quoted = true,
             "affected triangle rescored"
         );
@@ -1162,6 +1260,9 @@ fn info_triangle(
         } else {
             "disabled".to_string()
         },
+        execution_call_status = format_execution_call_status(execution_call),
+        execution_call_mode = format_execution_call_mode(execution_call),
+        execution_call_error = format_execution_call_error(execution_call),
         local_search_samples = candidate
             .local_quote
             .as_ref()
@@ -1213,6 +1314,40 @@ fn exact_edge_bps(result: &ExactQuoteResult) -> f64 {
     let amount_in = u256_to_f64(&result.amount_in);
     let amount_out = u256_to_f64(&result.amount_out);
     ((amount_out / amount_in) - 1.0) * 10_000.0
+}
+
+fn execution_call_json(report: &ExecutionCallReport) -> serde_json::Value {
+    json!({
+        "status": report.status(),
+        "success": report.success,
+        "mode": report.mode.map(|mode| mode.as_str()),
+        "skipped_reason": report.skipped_reason,
+        "error": report.error,
+        "return_data": report.return_data_hex(),
+        "calldata_bytes": report.calldata_bytes,
+    })
+}
+
+fn format_execution_call_status(report: Option<&ExecutionCallReport>) -> String {
+    report
+        .map(|call| call.status().to_string())
+        .unwrap_or_else(|| "disabled".to_string())
+}
+
+fn format_execution_call_mode(report: Option<&ExecutionCallReport>) -> String {
+    report
+        .and_then(|call| call.mode.map(|mode| mode.as_str().to_string()))
+        .unwrap_or_else(|| "n/a".to_string())
+}
+
+fn format_execution_call_error(report: Option<&ExecutionCallReport>) -> String {
+    report
+        .and_then(|call| {
+            call.error
+                .clone()
+                .or_else(|| call.skipped_reason.map(str::to_string))
+        })
+        .unwrap_or_else(|| "n/a".to_string())
 }
 
 fn format_amount(amount: &U256, token_map: &HashMap<Address, TokenDef>, token: Address) -> String {

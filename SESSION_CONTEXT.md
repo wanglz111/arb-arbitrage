@@ -592,3 +592,22 @@ After this execution-handoff pass, the most natural next build steps are:
   - `cargo fmt --manifest-path scanner/Cargo.toml`
   - `cargo test --manifest-path scanner/Cargo.toml`
   - `cargo clippy --manifest-path scanner/Cargo.toml -- -D warnings`
+- Added an optional final executor `eth_call` confirmation layer:
+  - new scanner config:
+    - `EXECUTION_CALL_RPC_URL`
+    - `SCANNER_EXECUTION_CALL_ENABLED`
+    - `SCANNER_REQUIRE_EXECUTION_CALL`
+    - `SCANNER_EXECUTOR_ADDRESS`
+    - `SCANNER_EXECUTOR_CALLER`
+    - `SCANNER_EXECUTION_CALL_MODE=direct|route`
+    - `SCANNER_MAX_EXECUTION_CALLS_PER_BLOCK`
+  - default behavior keeps this disabled, so the hot path still spends no extra RPC
+  - when enabled, only directional candidates with an execution plan are simulated through the deployed executor
+  - `direct` mode calls `RouteArb.execute(amountIn,minOut,path)` and does not require a preloaded route
+  - `route` mode calls `RouteArb.executeRoute(routeId,amountIn,minOut)` and requires route setup via the route catalog
+  - if `SCANNER_REQUIRE_EXECUTION_CALL=true`, debug JSONL emission is gated on a successful executor call
+  - JSONL and normal logs now include `execution_call` status/mode/error metadata
+- Validation completed for executor `eth_call` wiring:
+  - `cargo fmt --manifest-path scanner/Cargo.toml`
+  - `cargo test --manifest-path scanner/Cargo.toml`
+  - `cargo clippy --manifest-path scanner/Cargo.toml -- -D warnings`

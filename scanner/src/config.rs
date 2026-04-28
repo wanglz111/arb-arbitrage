@@ -1,6 +1,6 @@
 use std::{collections::HashMap, env, path::PathBuf, time::Duration};
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use ethers::types::Address;
 
 #[derive(Clone, Debug)]
@@ -21,6 +21,29 @@ pub struct PoolDef {
     pub reserve_usd_hint: f64,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ExecutionCallMode {
+    Direct,
+    Route,
+}
+
+impl ExecutionCallMode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Direct => "direct",
+            Self::Route => "route",
+        }
+    }
+
+    fn parse(raw: &str) -> Result<Self> {
+        match raw.trim().to_ascii_lowercase().as_str() {
+            "direct" | "execute" => Ok(Self::Direct),
+            "route" | "execute_route" | "executeroute" => Ok(Self::Route),
+            value => bail!("invalid SCANNER_EXECUTION_CALL_MODE `{value}`"),
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct ScannerConfig {
     pub rpc_url: String,
@@ -39,6 +62,13 @@ pub struct ScannerConfig {
     pub max_exact_quotes_per_block: usize,
     pub execution_slippage_bps: u32,
     pub log_execution_calldata: bool,
+    pub execution_call_enabled: bool,
+    pub require_execution_call: bool,
+    pub execution_call_rpc_url: String,
+    pub executor_address: Option<Address>,
+    pub executor_caller: Option<Address>,
+    pub execution_call_mode: ExecutionCallMode,
+    pub max_execution_calls_per_block: usize,
     pub debug_summary_enabled: bool,
     pub debug_jsonl_path: PathBuf,
     pub route_catalog_path: PathBuf,
@@ -56,6 +86,8 @@ impl ScannerConfig {
             .ok()
             .filter(|value| !value.trim().is_empty());
         let quote_rpc_url = env::var("QUOTE_RPC_URL").unwrap_or_else(|_| rpc_url.clone());
+        let execution_call_rpc_url =
+            env::var("EXECUTION_CALL_RPC_URL").unwrap_or_else(|_| quote_rpc_url.clone());
         let poll_interval_ms = env::var("SCANNER_POLL_MS")
             .unwrap_or_else(|_| "1500".to_string())
             .parse::<u64>()
@@ -103,6 +135,20 @@ impl ScannerConfig {
             .ok()
             .map(|raw| matches!(raw.as_str(), "1" | "true" | "TRUE" | "yes" | "YES"))
             .unwrap_or(false);
+        let execution_call_enabled = parse_bool_env("SCANNER_EXECUTION_CALL_ENABLED", false);
+        let require_execution_call = parse_bool_env("SCANNER_REQUIRE_EXECUTION_CALL", false);
+        let executor_address = parse_optional_address_env(&["SCANNER_EXECUTOR_ADDRESS"])?;
+        let executor_caller = parse_optional_address_env(&[
+            "SCANNER_EXECUTOR_CALLER",
+            "SCANNER_EXECUTOR_OWNER_ADDRESS",
+        ])?;
+        let execution_call_mode = ExecutionCallMode::parse(
+            &env::var("SCANNER_EXECUTION_CALL_MODE").unwrap_or_else(|_| "direct".to_string()),
+        )?;
+        let max_execution_calls_per_block = env::var("SCANNER_MAX_EXECUTION_CALLS_PER_BLOCK")
+            .unwrap_or_else(|_| "1".to_string())
+            .parse::<usize>()
+            .context("failed to parse SCANNER_MAX_EXECUTION_CALLS_PER_BLOCK")?;
         let debug_summary_enabled = env::var("SCANNER_DEBUG_SUMMARY_ENABLED")
             .ok()
             .map(|raw| matches!(raw.as_str(), "1" | "true" | "TRUE" | "yes" | "YES"))
@@ -117,6 +163,20 @@ impl ScannerConfig {
             .ok()
             .map(|raw| matches!(raw.as_str(), "1" | "true" | "TRUE" | "yes" | "YES"))
             .unwrap_or(true);
+
+        if require_execution_call && !execution_call_enabled {
+            bail!(
+                "SCANNER_REQUIRE_EXECUTION_CALL=true requires SCANNER_EXECUTION_CALL_ENABLED=true"
+            );
+        }
+        if execution_call_enabled && executor_address.is_none() {
+            bail!("SCANNER_EXECUTION_CALL_ENABLED=true requires SCANNER_EXECUTOR_ADDRESS");
+        }
+        if execution_call_enabled && executor_caller.is_none() {
+            bail!(
+                "SCANNER_EXECUTION_CALL_ENABLED=true requires SCANNER_EXECUTOR_CALLER or SCANNER_EXECUTOR_OWNER_ADDRESS"
+            );
+        }
 
         Ok(Self {
             rpc_url,
@@ -135,6 +195,13 @@ impl ScannerConfig {
             max_exact_quotes_per_block,
             execution_slippage_bps,
             log_execution_calldata,
+            execution_call_enabled,
+            require_execution_call,
+            execution_call_rpc_url,
+            executor_address,
+            executor_caller,
+            execution_call_mode,
+            max_execution_calls_per_block,
             debug_summary_enabled,
             debug_jsonl_path,
             route_catalog_path,
@@ -345,4 +412,47 @@ fn parse_size_bps_list(raw: &str) -> Result<Vec<u32>> {
     values.sort_unstable();
     values.dedup();
     Ok(values)
+}
+
+fn parse_bool_env(key: &str, default: bool) -> bool {
+    env::var(key)
+        .ok()
+        .map(|raw| matches!(raw.as_str(), "1" | "true" | "TRUE" | "yes" | "YES"))
+        .unwrap_or(default)
+}
+
+fn parse_optional_address_env(keys: &[&str]) -> Result<Option<Address>> {
+    for key in keys {
+        let Ok(raw) = env::var(key) else {
+            continue;
+        };
+        let trimmed = raw.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+
+        return trimmed
+            .parse::<Address>()
+            .with_context(|| format!("failed to parse {key}"))
+            .map(Some);
+    }
+
+    Ok(None)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ExecutionCallMode;
+
+    #[test]
+    fn execution_call_mode_accepts_direct_and_route_aliases() {
+        assert_eq!(
+            ExecutionCallMode::parse("direct").expect("direct"),
+            ExecutionCallMode::Direct
+        );
+        assert_eq!(
+            ExecutionCallMode::parse("executeRoute").expect("route"),
+            ExecutionCallMode::Route
+        );
+    }
 }
