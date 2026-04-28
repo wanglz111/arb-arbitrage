@@ -1,4 +1,7 @@
-use std::{collections::HashMap, sync::Arc};
+use std::{
+    collections::{BTreeMap, BTreeSet, HashMap},
+    sync::Arc,
+};
 
 use anyhow::{Context, Result, bail};
 use ethers::{
@@ -11,6 +14,7 @@ use ethers::{
 use crate::config::{PoolDef, ScannerConfig, TokenDef};
 
 pub type RpcProvider = Provider<Http>;
+const TICK_BITMAP_WORD_SCAN_RADIUS: i32 = 12;
 
 #[derive(Clone, Debug)]
 pub struct SwapStateUpdate {
@@ -23,6 +27,45 @@ pub struct SwapStateUpdate {
 }
 
 #[derive(Clone, Debug)]
+pub struct LiquidityStateUpdate {
+    pub pool: Address,
+    pub block_number: u64,
+    pub log_index: u64,
+    pub tick_lower: i32,
+    pub tick_upper: i32,
+    pub liquidity_delta: i128,
+}
+
+#[derive(Clone, Debug)]
+pub enum PoolStateEvent {
+    Swap(SwapStateUpdate),
+    Liquidity(LiquidityStateUpdate),
+}
+
+impl PoolStateEvent {
+    pub fn pool(&self) -> Address {
+        match self {
+            Self::Swap(update) => update.pool,
+            Self::Liquidity(update) => update.pool,
+        }
+    }
+
+    pub fn block_number(&self) -> u64 {
+        match self {
+            Self::Swap(update) => update.block_number,
+            Self::Liquidity(update) => update.block_number,
+        }
+    }
+
+    pub fn log_index(&self) -> u64 {
+        match self {
+            Self::Swap(update) => update.log_index,
+            Self::Liquidity(update) => update.log_index,
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
 pub struct PoolState {
     pub pool: PoolDef,
     pub sqrt_price_x96: U256,
@@ -30,6 +73,7 @@ pub struct PoolState {
     pub tick_spacing: i32,
     pub nearest_initialized_lower_tick: Option<i32>,
     pub nearest_initialized_upper_tick: Option<i32>,
+    pub initialized_ticks: BTreeMap<i32, i128>,
     pub liquidity: u128,
     pub last_updated_block: u64,
     pub last_updated_log_index: u64,
@@ -56,26 +100,43 @@ impl ScannerState {
         Ok(Self { pools })
     }
 
-    pub fn apply_swap_update(&mut self, pool: &PoolDef, update: &SwapStateUpdate) -> bool {
-        let should_apply = self
-            .pools
-            .get(&update.pool)
-            .map(|state| {
-                update.block_number > state.last_updated_block
-                    || (update.block_number == state.last_updated_block
-                        && update.log_index > state.last_updated_log_index)
-            })
-            .unwrap_or(true);
-
-        if !should_apply {
+    pub fn apply_pool_event(&mut self, pool: &PoolDef, event: &PoolStateEvent) -> bool {
+        if !self.should_apply(event.pool(), event.block_number(), event.log_index()) {
             return false;
         }
 
-        let next_pool = self
-            .pools
-            .get(&update.pool)
+        match event {
+            PoolStateEvent::Swap(update) => self.apply_swap_update_unchecked(pool, update),
+            PoolStateEvent::Liquidity(update) => {
+                self.apply_liquidity_update_unchecked(pool, update)
+            }
+        }
+
+        true
+    }
+
+    fn should_apply(&self, pool: Address, block_number: u64, log_index: u64) -> bool {
+        self.pools
+            .get(&pool)
+            .map(|state| {
+                block_number > state.last_updated_block
+                    || (block_number == state.last_updated_block
+                        && log_index > state.last_updated_log_index)
+            })
+            .unwrap_or(true)
+    }
+
+    fn apply_swap_update_unchecked(&mut self, pool: &PoolDef, update: &SwapStateUpdate) {
+        let existing = self.pools.get(&update.pool);
+        let next_pool = existing
             .map(|state| state.pool.clone())
             .unwrap_or_else(|| pool.clone());
+        let tick_spacing = existing.map(|state| state.tick_spacing).unwrap_or(1);
+        let initialized_ticks = existing
+            .map(|state| state.initialized_ticks.clone())
+            .unwrap_or_default();
+        let (nearest_initialized_lower_tick, nearest_initialized_upper_tick) =
+            initialized_tick_bounds(&initialized_ticks, update.tick);
 
         self.pools.insert(
             update.pool,
@@ -83,26 +144,57 @@ impl ScannerState {
                 pool: next_pool,
                 sqrt_price_x96: update.sqrt_price_x96,
                 tick: update.tick,
-                tick_spacing: self
-                    .pools
-                    .get(&update.pool)
-                    .map(|state| state.tick_spacing)
-                    .unwrap_or(1),
-                nearest_initialized_lower_tick: self
-                    .pools
-                    .get(&update.pool)
-                    .and_then(|state| state.nearest_initialized_lower_tick),
-                nearest_initialized_upper_tick: self
-                    .pools
-                    .get(&update.pool)
-                    .and_then(|state| state.nearest_initialized_upper_tick),
+                tick_spacing,
+                nearest_initialized_lower_tick,
+                nearest_initialized_upper_tick,
+                initialized_ticks,
                 liquidity: update.liquidity,
                 last_updated_block: update.block_number,
                 last_updated_log_index: update.log_index,
             },
         );
+    }
 
-        true
+    fn apply_liquidity_update_unchecked(&mut self, pool: &PoolDef, update: &LiquidityStateUpdate) {
+        let mut state = self
+            .pools
+            .get(&update.pool)
+            .cloned()
+            .unwrap_or_else(|| PoolState {
+                pool: pool.clone(),
+                sqrt_price_x96: U256::zero(),
+                tick: 0,
+                tick_spacing: 1,
+                nearest_initialized_lower_tick: None,
+                nearest_initialized_upper_tick: None,
+                initialized_ticks: BTreeMap::new(),
+                liquidity: 0,
+                last_updated_block: 0,
+                last_updated_log_index: 0,
+            });
+
+        apply_liquidity_net_delta(
+            &mut state.initialized_ticks,
+            update.tick_lower,
+            update.liquidity_delta,
+        );
+        apply_liquidity_net_delta(
+            &mut state.initialized_ticks,
+            update.tick_upper,
+            -update.liquidity_delta,
+        );
+
+        if update.tick_lower <= state.tick && state.tick < update.tick_upper {
+            state.liquidity = apply_active_liquidity_delta(state.liquidity, update.liquidity_delta);
+        }
+
+        let (lower, upper) = initialized_tick_bounds(&state.initialized_ticks, state.tick);
+        state.nearest_initialized_lower_tick = lower;
+        state.nearest_initialized_upper_tick = upper;
+        state.last_updated_block = update.block_number;
+        state.last_updated_log_index = update.log_index;
+
+        self.pools.insert(update.pool, state);
     }
 }
 
@@ -197,10 +289,11 @@ async fn load_dynamic_pool_state(
         .call()
         .await
         .with_context(|| format!("slot0() failed for {}", pool.name))?;
+    let initialized_ticks = load_initialized_ticks(&contract, tick, tick_spacing)
+        .await
+        .with_context(|| format!("failed to load initialized ticks for {}", pool.name))?;
     let (nearest_initialized_lower_tick, nearest_initialized_upper_tick) =
-        load_initialized_tick_bounds(&contract, tick, tick_spacing)
-            .await
-            .with_context(|| format!("failed to load initialized tick bounds for {}", pool.name))?;
+        initialized_tick_bounds(&initialized_ticks, tick);
 
     Ok(PoolState {
         pool,
@@ -209,6 +302,7 @@ async fn load_dynamic_pool_state(
         tick_spacing,
         nearest_initialized_lower_tick,
         nearest_initialized_upper_tick,
+        initialized_ticks,
         liquidity,
         last_updated_block: at_block,
         last_updated_log_index: u64::MAX,
@@ -227,96 +321,173 @@ fn pool_abi() -> Result<Abi> {
             "function fee() view returns (uint24)",
             "function tickSpacing() view returns (int24)",
             "function tickBitmap(int16) view returns (uint256)",
+            "function ticks(int24) view returns (uint128 liquidityGross, int128 liquidityNet, uint256 feeGrowthOutside0X128, uint256 feeGrowthOutside1X128, int56 tickCumulativeOutside, uint160 secondsPerLiquidityOutsideX128, uint32 secondsOutside, bool initialized)",
             "function liquidity() view returns (uint128)",
             "function slot0() view returns (uint160 sqrtPriceX96, int24 tick, uint16 observationIndex, uint16 observationCardinality, uint16 observationCardinalityNext, uint8 feeProtocol, bool unlocked)",
         ])
         .context("failed to build Uniswap v3 pool ABI")
 }
 
-async fn load_initialized_tick_bounds(
+async fn load_initialized_ticks(
     contract: &Contract<RpcProvider>,
     tick: i32,
     tick_spacing: i32,
-) -> Result<(Option<i32>, Option<i32>)> {
+) -> Result<BTreeMap<i32, i128>> {
     let spacing = tick_spacing.max(1);
     let compressed = tick.div_euclid(spacing);
     let current_word = compressed >> 8;
-    let current_bit = compressed.rem_euclid(256);
+    let mut words = BTreeSet::new();
 
-    let mut lower = None;
-    let mut upper = None;
+    for distance in 0..=TICK_BITMAP_WORD_SCAN_RADIUS {
+        words.insert(current_word - distance);
+        words.insert(current_word + distance);
+    }
 
-    for distance in 0..=8i32 {
-        if lower.is_none() {
-            let word = current_word - distance;
-            let bitmap: U256 = contract
-                .method::<_, U256>("tickBitmap", word as i16)?
-                .call()
-                .await?;
-            lower = find_lower_initialized_tick(
-                bitmap,
-                word,
-                if distance == 0 { current_bit } else { 255 },
-                spacing,
-            );
-        }
+    let mut initialized_ticks = BTreeMap::new();
 
-        if upper.is_none() {
-            let word = current_word + distance;
-            let bitmap: U256 = contract
-                .method::<_, U256>("tickBitmap", word as i16)?
-                .call()
-                .await?;
-            upper = find_upper_initialized_tick(
-                bitmap,
-                word,
-                if distance == 0 { current_bit + 1 } else { 0 },
-                spacing,
-            );
-        }
+    for word in words {
+        let bitmap: U256 = contract
+            .method::<_, U256>("tickBitmap", word as i16)?
+            .call()
+            .await?;
 
-        if lower.is_some() && upper.is_some() {
-            break;
+        for bit in 0..256usize {
+            if !bitmap.bit(bit) {
+                continue;
+            }
+
+            let tick = ((word << 8) + bit as i32) * spacing;
+            let (_, liquidity_net, _, _, _, _, _, initialized): (
+                u128,
+                i128,
+                U256,
+                U256,
+                i64,
+                U256,
+                u32,
+                bool,
+            ) = contract.method::<_, _>("ticks", tick)?.call().await?;
+
+            if initialized && liquidity_net != 0 {
+                initialized_ticks.insert(tick, liquidity_net);
+            }
         }
     }
 
-    Ok((lower, upper))
+    Ok(initialized_ticks)
 }
 
-fn find_lower_initialized_tick(
-    bitmap: U256,
-    word: i32,
-    start_bit: i32,
-    spacing: i32,
-) -> Option<i32> {
-    if start_bit < 0 {
-        return None;
-    }
+fn initialized_tick_bounds(
+    initialized_ticks: &BTreeMap<i32, i128>,
+    tick: i32,
+) -> (Option<i32>, Option<i32>) {
+    let lower = initialized_ticks
+        .range(..=tick)
+        .next_back()
+        .map(|(tick, _)| *tick);
+    let upper = initialized_ticks
+        .range((tick + 1)..)
+        .next()
+        .map(|(tick, _)| *tick);
 
-    for bit in (0..=start_bit as usize).rev() {
-        if bitmap.bit(bit) {
-            return Some(((word << 8) + bit as i32) * spacing);
-        }
-    }
-
-    None
+    (lower, upper)
 }
 
-fn find_upper_initialized_tick(
-    bitmap: U256,
-    word: i32,
-    start_bit: i32,
-    spacing: i32,
-) -> Option<i32> {
-    if start_bit > 255 {
-        return None;
+fn apply_liquidity_net_delta(ticks: &mut BTreeMap<i32, i128>, tick: i32, delta: i128) {
+    let next = ticks.get(&tick).copied().unwrap_or_default() + delta;
+    if next == 0 {
+        ticks.remove(&tick);
+    } else {
+        ticks.insert(tick, next);
+    }
+}
+
+fn apply_active_liquidity_delta(liquidity: u128, delta: i128) -> u128 {
+    if delta >= 0 {
+        liquidity.saturating_add(delta as u128)
+    } else {
+        liquidity.saturating_sub((-delta) as u128)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn addr(raw: &str) -> Address {
+        raw.parse().expect("invalid test address")
     }
 
-    for bit in start_bit as usize..256 {
-        if bitmap.bit(bit) {
-            return Some(((word << 8) + bit as i32) * spacing);
+    fn pool_def(pool: Address, token0: Address, token1: Address) -> PoolDef {
+        PoolDef {
+            name: "test",
+            address: pool,
+            token0,
+            token1,
+            fee: 500,
+            reserve_usd_hint: 1_000_000.0,
         }
     }
 
-    None
+    fn pool_state(pool: PoolDef) -> PoolState {
+        PoolState {
+            pool,
+            sqrt_price_x96: U256::from_dec_str("79228162514264337593543950336").expect("q96"),
+            tick: 0,
+            tick_spacing: 10,
+            nearest_initialized_lower_tick: Some(-10),
+            nearest_initialized_upper_tick: Some(10),
+            initialized_ticks: BTreeMap::from([(-10, 100), (10, -100)]),
+            liquidity: 100,
+            last_updated_block: 0,
+            last_updated_log_index: 0,
+        }
+    }
+
+    #[test]
+    fn mint_and_burn_update_initialized_ticks_and_active_liquidity() {
+        let pool_address = addr("0x1000000000000000000000000000000000000001");
+        let pool = pool_def(
+            pool_address,
+            addr("0x2000000000000000000000000000000000000001"),
+            addr("0x2000000000000000000000000000000000000002"),
+        );
+        let mut state = ScannerState {
+            pools: HashMap::from([(pool_address, pool_state(pool.clone()))]),
+        };
+
+        let mint = PoolStateEvent::Liquidity(LiquidityStateUpdate {
+            pool: pool_address,
+            block_number: 1,
+            log_index: 0,
+            tick_lower: -5,
+            tick_upper: 5,
+            liquidity_delta: 25,
+        });
+
+        assert!(state.apply_pool_event(&pool, &mint));
+        let updated = state.pools.get(&pool_address).expect("pool");
+        assert_eq!(updated.liquidity, 125);
+        assert_eq!(updated.initialized_ticks.get(&-5), Some(&25));
+        assert_eq!(updated.initialized_ticks.get(&5), Some(&-25));
+        assert_eq!(updated.nearest_initialized_lower_tick, Some(-5));
+        assert_eq!(updated.nearest_initialized_upper_tick, Some(5));
+
+        let burn = PoolStateEvent::Liquidity(LiquidityStateUpdate {
+            pool: pool_address,
+            block_number: 1,
+            log_index: 1,
+            tick_lower: -5,
+            tick_upper: 5,
+            liquidity_delta: -10,
+        });
+
+        assert!(state.apply_pool_event(&pool, &burn));
+        let updated = state.pools.get(&pool_address).expect("pool");
+        assert_eq!(updated.liquidity, 115);
+        assert_eq!(updated.initialized_ticks.get(&-5), Some(&15));
+        assert_eq!(updated.initialized_ticks.get(&5), Some(&-15));
+
+        assert!(!state.apply_pool_event(&pool, &mint));
+    }
 }

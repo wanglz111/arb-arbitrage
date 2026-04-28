@@ -1,6 +1,27 @@
 # Arbitrum Triangle Arbitrage Session Context
 
-Last updated: 2026-04-27
+Last updated: 2026-04-28
+
+## 2026-04-28 Autonomous Build Directive
+
+User asked Codex to continue without further prompts and move the project toward a complete narrow MEV/arbitrage system.
+
+Immediate implementation requirements:
+
+- Remove GitHub Actions packaging support.
+- Move image build and GHCR push into a local pre-commit hook.
+- In `SCANNER_DEBUG_SUMMARY_ENABLED=true`, suppress normal noisy logs and only emit/write observations when a locally directional/profitable candidate exists.
+- Persist directional observations as JSONL.
+- Continue prioritizing local computation and log subscriptions over HTTP/RPC calls.
+- Keep Alchemy/free RPC usage low; paid RPC should only be reserved for small, high-concurrency needs.
+- Keep useful progress notes in this file as implementation proceeds.
+
+Current implementation baseline before this round:
+
+- Scanner has live/backfill pool events for `Swap`, `Mint`, and `Burn`.
+- Scanner maintains initialized tick `liquidityNet` around tracked V3 pools.
+- Local V3 simulation can cross multiple loaded initialized ticks using local liquidity changes.
+- Execution calldata can be generated for the current `TriangleArb.execute(uint256,uint256,bytes)` contract path.
 
 ## Objective
 

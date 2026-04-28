@@ -10,6 +10,7 @@ use crate::{
 
 const Q96_F64: f64 = 79_228_162_514_264_337_593_543_950_336.0;
 const LOCAL_REFINE_ROUNDS: usize = 2;
+const MAX_TICK_CROSSES_PER_LEG: usize = 256;
 
 #[derive(Clone, Debug)]
 pub struct LocalQuoteResult {
@@ -200,7 +201,7 @@ impl PoolState {
         }
 
         let sqrt_price = self.sqrt_price_x96.to_string().parse::<f64>().ok()? / Q96_F64;
-        let liquidity = self.liquidity as f64;
+        let mut liquidity = self.liquidity as f64;
 
         if !sqrt_price.is_finite()
             || sqrt_price <= 0.0
@@ -211,48 +212,232 @@ impl PoolState {
         }
 
         if token_in == self.pool.token0 && token_out == self.pool.token1 {
-            let sqrt_lower = sqrt_ratio_at_tick(
-                self.nearest_initialized_lower_tick
-                    .unwrap_or_else(|| current_tick_lower(self.tick, self.tick_spacing)),
+            return simulate_zero_for_one(self, amount_in_less_fee, sqrt_price, &mut liquidity);
+        }
+
+        if token_in == self.pool.token1 && token_out == self.pool.token0 {
+            return simulate_one_for_zero(self, amount_in_less_fee, sqrt_price, &mut liquidity);
+        }
+
+        None
+    }
+}
+
+fn simulate_zero_for_one(
+    pool: &PoolState,
+    mut amount_remaining: f64,
+    mut sqrt_price: f64,
+    liquidity: &mut f64,
+) -> Option<LocalLegResult> {
+    let mut amount_out = 0.0f64;
+    let mut current_tick = pool.tick;
+    let mut crossed_ticks = 0usize;
+    let mut max_headroom_ratio = 0.0f64;
+
+    for _ in 0..=MAX_TICK_CROSSES_PER_LEG {
+        if amount_remaining <= 0.0 {
+            break;
+        }
+
+        let Some(next_tick) = pool.next_initialized_tick_below(current_tick) else {
+            let sqrt_lower =
+                sqrt_ratio_at_tick(current_tick_lower(current_tick, pool.tick_spacing));
+            return finish_zero_for_one_without_loaded_tick(
+                amount_remaining,
+                amount_out,
+                sqrt_price,
+                *liquidity,
+                sqrt_lower,
+                crossed_ticks,
+                max_headroom_ratio,
             );
-            let max_amount_in_less_fee = liquidity * ((1.0 / sqrt_lower) - (1.0 / sqrt_price));
-            let headroom_ratio = headroom_ratio(amount_in_less_fee, max_amount_in_less_fee);
-            let inv_next = (1.0 / sqrt_price) + (amount_in_less_fee / liquidity);
+        };
+        let sqrt_target = sqrt_ratio_at_tick(next_tick);
+        let max_amount_in = *liquidity * ((1.0 / sqrt_target) - (1.0 / sqrt_price));
+        max_headroom_ratio =
+            max_headroom_ratio.max(headroom_ratio(amount_remaining, max_amount_in));
+
+        if amount_remaining < max_amount_in {
+            let inv_next = (1.0 / sqrt_price) + (amount_remaining / *liquidity);
             if !inv_next.is_finite() || inv_next <= 0.0 {
                 return None;
             }
 
             let sqrt_price_next = 1.0 / inv_next;
-            let amount_out = liquidity * (sqrt_price - sqrt_price_next);
-            return Some(LocalLegResult {
-                amount_out: positive_finite(amount_out)?,
-                crosses_tick: amount_in_less_fee > max_amount_in_less_fee,
-                headroom_ratio,
-            });
+            amount_out += *liquidity * (sqrt_price - sqrt_price_next);
+            amount_remaining = 0.0;
+            break;
         }
 
-        if token_in == self.pool.token1 && token_out == self.pool.token0 {
-            let sqrt_upper =
-                sqrt_ratio_at_tick(self.nearest_initialized_upper_tick.unwrap_or_else(|| {
-                    current_tick_lower(self.tick, self.tick_spacing) + self.tick_spacing
-                }));
-            let max_amount_in_less_fee = liquidity * (sqrt_upper - sqrt_price);
-            let headroom_ratio = headroom_ratio(amount_in_less_fee, max_amount_in_less_fee);
-            let sqrt_price_next = sqrt_price + (amount_in_less_fee / liquidity);
+        amount_remaining -= max_amount_in;
+        amount_out += *liquidity * (sqrt_price - sqrt_target);
+        sqrt_price = sqrt_target;
+        crossed_ticks += 1;
+        let liquidity_net = pool.initialized_ticks.get(&next_tick).copied()?;
+        *liquidity = apply_crossed_liquidity(*liquidity, -liquidity_net);
+        if *liquidity <= 0.0 {
+            return None;
+        }
+        current_tick = next_tick;
+    }
+
+    if amount_remaining > 0.0 {
+        return None;
+    }
+
+    Some(LocalLegResult {
+        amount_out: positive_finite(amount_out)?,
+        crosses_tick: crossed_ticks > 0,
+        headroom_ratio: max_headroom_ratio,
+    })
+}
+
+fn simulate_one_for_zero(
+    pool: &PoolState,
+    mut amount_remaining: f64,
+    mut sqrt_price: f64,
+    liquidity: &mut f64,
+) -> Option<LocalLegResult> {
+    let mut amount_out = 0.0f64;
+    let mut current_tick = pool.tick;
+    let mut crossed_ticks = 0usize;
+    let mut max_headroom_ratio = 0.0f64;
+
+    for _ in 0..=MAX_TICK_CROSSES_PER_LEG {
+        if amount_remaining <= 0.0 {
+            break;
+        }
+
+        let Some(next_tick) = pool.next_initialized_tick_above(current_tick) else {
+            let sqrt_upper = sqrt_ratio_at_tick(
+                current_tick_lower(current_tick, pool.tick_spacing) + pool.tick_spacing,
+            );
+            return finish_one_for_zero_without_loaded_tick(
+                amount_remaining,
+                amount_out,
+                sqrt_price,
+                *liquidity,
+                sqrt_upper,
+                crossed_ticks,
+                max_headroom_ratio,
+            );
+        };
+        let sqrt_target = sqrt_ratio_at_tick(next_tick);
+        let max_amount_in = *liquidity * (sqrt_target - sqrt_price);
+        max_headroom_ratio =
+            max_headroom_ratio.max(headroom_ratio(amount_remaining, max_amount_in));
+
+        if amount_remaining < max_amount_in {
+            let sqrt_price_next = sqrt_price + (amount_remaining / *liquidity);
             if !sqrt_price_next.is_finite() || sqrt_price_next <= 0.0 {
                 return None;
             }
 
-            let amount_out = liquidity * ((1.0 / sqrt_price) - (1.0 / sqrt_price_next));
-            return Some(LocalLegResult {
-                amount_out: positive_finite(amount_out)?,
-                crosses_tick: amount_in_less_fee > max_amount_in_less_fee,
-                headroom_ratio,
-            });
+            amount_out += *liquidity * ((1.0 / sqrt_price) - (1.0 / sqrt_price_next));
+            amount_remaining = 0.0;
+            break;
         }
 
-        None
+        amount_remaining -= max_amount_in;
+        amount_out += *liquidity * ((1.0 / sqrt_price) - (1.0 / sqrt_target));
+        sqrt_price = sqrt_target;
+        crossed_ticks += 1;
+        let liquidity_net = pool.initialized_ticks.get(&next_tick).copied()?;
+        *liquidity = apply_crossed_liquidity(*liquidity, liquidity_net);
+        if *liquidity <= 0.0 {
+            return None;
+        }
+        current_tick = next_tick;
     }
+
+    if amount_remaining > 0.0 {
+        return None;
+    }
+
+    Some(LocalLegResult {
+        amount_out: positive_finite(amount_out)?,
+        crosses_tick: crossed_ticks > 0,
+        headroom_ratio: max_headroom_ratio,
+    })
+}
+
+fn finish_zero_for_one_without_loaded_tick(
+    amount_remaining: f64,
+    amount_out_so_far: f64,
+    sqrt_price: f64,
+    liquidity: f64,
+    sqrt_lower: f64,
+    crossed_ticks: usize,
+    max_headroom_ratio: f64,
+) -> Option<LocalLegResult> {
+    let max_amount_in = liquidity * ((1.0 / sqrt_lower) - (1.0 / sqrt_price));
+    let headroom = max_headroom_ratio.max(headroom_ratio(amount_remaining, max_amount_in));
+    if amount_remaining > max_amount_in {
+        return None;
+    }
+
+    let inv_next = (1.0 / sqrt_price) + (amount_remaining / liquidity);
+    if !inv_next.is_finite() || inv_next <= 0.0 {
+        return None;
+    }
+
+    let sqrt_price_next = 1.0 / inv_next;
+    Some(LocalLegResult {
+        amount_out: positive_finite(
+            amount_out_so_far + liquidity * (sqrt_price - sqrt_price_next),
+        )?,
+        crosses_tick: crossed_ticks > 0,
+        headroom_ratio: headroom,
+    })
+}
+
+fn finish_one_for_zero_without_loaded_tick(
+    amount_remaining: f64,
+    amount_out_so_far: f64,
+    sqrt_price: f64,
+    liquidity: f64,
+    sqrt_upper: f64,
+    crossed_ticks: usize,
+    max_headroom_ratio: f64,
+) -> Option<LocalLegResult> {
+    let max_amount_in = liquidity * (sqrt_upper - sqrt_price);
+    let headroom = max_headroom_ratio.max(headroom_ratio(amount_remaining, max_amount_in));
+    if amount_remaining > max_amount_in {
+        return None;
+    }
+
+    let sqrt_price_next = sqrt_price + (amount_remaining / liquidity);
+    if !sqrt_price_next.is_finite() || sqrt_price_next <= 0.0 {
+        return None;
+    }
+
+    Some(LocalLegResult {
+        amount_out: positive_finite(
+            amount_out_so_far + liquidity * ((1.0 / sqrt_price) - (1.0 / sqrt_price_next)),
+        )?,
+        crosses_tick: crossed_ticks > 0,
+        headroom_ratio: headroom,
+    })
+}
+
+impl PoolState {
+    fn next_initialized_tick_below(&self, current_tick: i32) -> Option<i32> {
+        self.initialized_ticks
+            .range(..current_tick)
+            .next_back()
+            .map(|(tick, _)| *tick)
+    }
+
+    fn next_initialized_tick_above(&self, current_tick: i32) -> Option<i32> {
+        self.initialized_ticks
+            .range((current_tick + 1)..)
+            .next()
+            .map(|(tick, _)| *tick)
+    }
+}
+
+fn apply_crossed_liquidity(liquidity: f64, liquidity_delta: i128) -> f64 {
+    liquidity + liquidity_delta as f64
 }
 
 fn current_tick_lower(current_tick: i32, tick_spacing: i32) -> i32 {
@@ -395,7 +580,7 @@ mod tests {
         state::{PoolState, ScannerState},
     };
     use ethers::types::{Address, U256};
-    use std::time::Instant;
+    use std::{collections::BTreeMap, time::Instant};
 
     fn addr(raw: &str) -> Address {
         raw.parse().expect("invalid test address")
@@ -435,7 +620,44 @@ mod tests {
             tick_spacing: 10,
             nearest_initialized_lower_tick: Some(-10),
             nearest_initialized_upper_tick: Some(10),
+            initialized_ticks: BTreeMap::from([
+                (-10, 10_000_000_000_000_000),
+                (10, -10_000_000_000_000_000),
+            ]),
             liquidity: 10_000_000_000_000_000,
+            last_updated_block: 0,
+            last_updated_log_index: 0,
+        }
+    }
+
+    fn test_pool_with_ticks(
+        token0: Address,
+        token1: Address,
+        initialized_ticks: BTreeMap<i32, i128>,
+        liquidity: u128,
+    ) -> PoolState {
+        PoolState {
+            pool: PoolDef {
+                name: "multi tick",
+                address: addr("0x1000000000000000000000000000000000000010"),
+                token0,
+                token1,
+                fee: 500,
+                reserve_usd_hint: 1_000_000.0,
+            },
+            sqrt_price_x96: U256::from_dec_str("79228162514264337593543950336").expect("q96"),
+            tick: 0,
+            tick_spacing: 10,
+            nearest_initialized_lower_tick: initialized_ticks
+                .range(..=0)
+                .next_back()
+                .map(|(tick, _)| *tick),
+            nearest_initialized_upper_tick: initialized_ticks
+                .range(1..)
+                .next()
+                .map(|(tick, _)| *tick),
+            initialized_ticks,
+            liquidity,
             last_updated_block: 0,
             last_updated_log_index: 0,
         }
@@ -517,6 +739,26 @@ mod tests {
             build_refinement_size_bps(&[2500, 5000, 10_000, 20_000, 40_000], 40_000),
             vec![30_000, 50_000]
         );
+    }
+
+    #[test]
+    fn local_swap_simulation_crosses_multiple_initialized_ticks() {
+        let token0 = addr("0x2000000000000000000000000000000000000001");
+        let token1 = addr("0x2000000000000000000000000000000000000002");
+        let pool = test_pool_with_ticks(
+            token0,
+            token1,
+            BTreeMap::from([(-10, 1_000_000), (10, -500_000), (20, -500_000)]),
+            1_000_000,
+        );
+
+        let result = pool
+            .simulate_swap_raw(600.0, token1, token0)
+            .expect("multi-tick quote");
+
+        assert!(result.crosses_tick);
+        assert!(result.amount_out > 0.0);
+        assert!(result.headroom_ratio > 1.0);
     }
 
     #[test]

@@ -16,16 +16,16 @@ This repo is focused on one concrete goal: detect Uniswap v3 triangle opportunit
 Working pieces today:
 
 - Rust scanner for event-driven triangle discovery
-- in-memory tracked-pool state with live `Swap` updates and HTTP backfill
+- in-memory tracked-pool state with live `Swap` / `Mint` / `Burn` updates and HTTP backfill
 - rough scoring plus local coarse+refine size search
+- multi-tick local Uniswap v3 simulation across loaded initialized ticks
 - fast local execution calldata construction
 - Solidity flash-loan executor and fork smoke tests
 - Docker image build and `docker compose` deployment path
 
 What is not finished yet:
 
-- full `Mint` / `Burn` event handling
-- full multi-tick local simulation
+- exact integer-equivalent Uniswap v3 simulation
 - gas-aware filtering
 - automatic live execution
 
@@ -111,7 +111,6 @@ More details are in [DEPLOYMENT.md](/Users/edy/lucas/arb-arbitrage/DEPLOYMENT.md
 
 ## Next Steps
 
-1. Add `Mint` and `Burn` support to tracked pool state.
-2. Improve local simulation quality across tick boundaries.
-3. Add execution policy, gas policy, and transaction submission.
-4. Validate more paths and sizing logic against historical and live data.
+1. Improve local simulation precision toward integer-equivalent Uniswap v3 math.
+2. Add execution policy, gas policy, and transaction submission.
+3. Validate more paths and sizing logic against historical and live data.

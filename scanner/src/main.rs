@@ -27,7 +27,7 @@ use crate::{
     graph::TriangleGraph,
     quote::{ExactQuoteResult, QuoteEngine},
     simulate::LocalQuoteResult,
-    state::{RpcProvider, ScannerState, SwapStateUpdate},
+    state::{PoolStateEvent, RpcProvider, ScannerState},
 };
 
 #[derive(Clone, Debug)]
@@ -203,38 +203,48 @@ struct CandidateProcessor<'a> {
 }
 
 impl<'a> CandidateProcessor<'a> {
-    async fn apply_swap_update(
+    async fn apply_pool_event(
         &self,
         source: &'static str,
         state: &mut ScannerState,
-        update: SwapStateUpdate,
+        event: PoolStateEvent,
         quote_throttle: &mut QuoteThrottle,
         debug_summary: &mut DebugSummaryCollector,
     ) {
+        let pool_address = event.pool();
+        let block_number = event.block_number();
+        let log_index = event.log_index();
         let Some(pool) = self
             .config
             .pools
             .iter()
-            .find(|pool| pool.address == update.pool)
+            .find(|pool| pool.address == pool_address)
         else {
             return;
+        };
+        let event_kind = match &event {
+            PoolStateEvent::Swap(_) => "swap",
+            PoolStateEvent::Liquidity(update) if update.liquidity_delta >= 0 => "mint",
+            PoolStateEvent::Liquidity(_) => "burn",
         };
 
         info!(
             source = source,
+            event = event_kind,
             pool = pool.name,
-            block = update.block_number,
-            log_index = update.log_index,
-            "received swap event"
+            block = block_number,
+            log_index = log_index,
+            "received pool event"
         );
 
-        if !state.apply_swap_update(pool, &update) {
-            if let Some(pool_state) = state.pools.get(&update.pool) {
+        if !state.apply_pool_event(pool, &event) {
+            if let Some(pool_state) = state.pools.get(&pool_address) {
                 info!(
                     source = source,
                     pool = pool.name,
-                    block = update.block_number,
-                    log_index = update.log_index,
+                    event = event_kind,
+                    block = block_number,
+                    log_index = log_index,
                     current_block = pool_state.last_updated_block,
                     current_log_index = pool_state.last_updated_log_index,
                     "skipped stale event"
@@ -243,25 +253,27 @@ impl<'a> CandidateProcessor<'a> {
             return;
         }
 
-        if let Some(pool_state) = state.pools.get(&update.pool) {
+        if let Some(pool_state) = state.pools.get(&pool_address) {
             info!(
                 source = source,
                 pool = pool_state.pool.name,
+                event = event_kind,
                 tick = pool_state.tick,
                 liquidity = pool_state.liquidity.to_string(),
+                initialized_ticks = pool_state.initialized_ticks.len(),
                 updated_block = pool_state.last_updated_block,
                 log_index = pool_state.last_updated_log_index,
                 reserve_hint_usd = format!("{:.0}", pool_state.pool.reserve_usd_hint),
-                "applied swap event to pool state"
+                "applied pool event to pool state"
             );
         }
 
         let mut changed_pools = HashSet::new();
-        changed_pools.insert(update.pool);
+        changed_pools.insert(pool_address);
         self.process_affected_triangles(
             state,
             &changed_pools,
-            update.block_number,
+            block_number,
             quote_throttle,
             debug_summary,
         )
@@ -411,7 +423,7 @@ async fn main() -> Result<()> {
         quote_engine: &quote_engine,
         execution_builder: &execution_builder,
     };
-    let mut live_receiver = watcher::spawn_live_swap_watcher(config.clone());
+    let mut live_receiver = watcher::spawn_live_pool_watcher(config.clone());
     let mut quote_throttle = QuoteThrottle::new();
     let mut debug_summary = DebugSummaryCollector::default();
     let tracked_reserve_hint_usd: f64 = config.pools.iter().map(|pool| pool.reserve_usd_hint).sum();
@@ -475,12 +487,12 @@ async fn main() -> Result<()> {
             _ = recv_debug_summary_tick(&mut debug_summary_interval) => {
                 debug_summary.log_and_reset(config.debug_summary_interval, &token_map);
             }
-            Some(update) = recv_live_event(&mut live_receiver) => {
+            Some(event) = recv_live_event(&mut live_receiver) => {
                 processor
-                    .apply_swap_update(
+                    .apply_pool_event(
                         "live",
                         &mut state,
-                        update,
+                        event,
                         &mut quote_throttle,
                         &mut debug_summary,
                     )
@@ -493,7 +505,7 @@ async fn main() -> Result<()> {
                     continue;
                 }
 
-                let changed_pools = watcher::poll_changed_pools(
+                let updates = watcher::poll_pool_events(
                     log_provider.clone(),
                     &config,
                     next_block,
@@ -501,14 +513,14 @@ async fn main() -> Result<()> {
                 )
                 .await;
 
-                let updates = match changed_pools {
+                let updates = match updates {
                     Ok(updates) => updates,
                     Err(error) => {
                         warn!(
                             from_block = next_block,
                             to_block = latest_block,
                             error = %error,
-                            "failed to backfill swap logs"
+                            "failed to backfill pool logs"
                         );
                         next_block = latest_block.saturating_add(1);
                         continue;
@@ -520,21 +532,28 @@ async fn main() -> Result<()> {
                     continue;
                 }
 
-                let unique_pools: HashSet<_> = updates.iter().map(|update| update.pool).collect();
+                let unique_pools: HashSet<_> = updates.iter().map(|update| update.pool()).collect();
+                let swap_events = updates
+                    .iter()
+                    .filter(|update| matches!(update, PoolStateEvent::Swap(_)))
+                    .count();
+                let liquidity_events = updates.len().saturating_sub(swap_events);
                 info!(
                     from_block = next_block,
                     to_block = latest_block,
-                    swap_events = updates.len(),
+                    pool_events = updates.len(),
+                    swap_events,
+                    liquidity_events,
                     changed_pools = unique_pools.len(),
-                    "detected backfill swap activity"
+                    "detected backfill pool activity"
                 );
 
-                for update in updates {
+                for event in updates {
                     processor
-                        .apply_swap_update(
+                        .apply_pool_event(
                             "backfill",
                             &mut state,
-                            update,
+                            event,
                             &mut quote_throttle,
                             &mut debug_summary,
                         )
@@ -589,11 +608,11 @@ fn read_build_env(key: &str) -> String {
 }
 
 async fn recv_live_event(
-    receiver: &mut Option<mpsc::Receiver<SwapStateUpdate>>,
-) -> Option<SwapStateUpdate> {
+    receiver: &mut Option<mpsc::Receiver<PoolStateEvent>>,
+) -> Option<PoolStateEvent> {
     match receiver {
         Some(receiver) => receiver.recv().await,
-        None => std::future::pending::<Option<SwapStateUpdate>>().await,
+        None => std::future::pending::<Option<PoolStateEvent>>().await,
     }
 }
 

@@ -8,14 +8,14 @@ This first version does:
 
 - track a small curated set of core Uniswap v3 pools
 - bootstrap `token0/token1/fee/slot0/liquidity`
-- subscribe to `Swap` logs over WebSocket when available
-- backfill `Swap` logs over HTTP for tracked pools
-- update in-memory pool state directly from decoded `Swap` events
+- subscribe to `Swap` / `Mint` / `Burn` logs over WebSocket when available
+- backfill `Swap` / `Mint` / `Burn` logs over HTTP for tracked pools
+- update in-memory pool state directly from decoded pool events
 - recompute only triangles affected by the changed pools
 - print a rough `edge_bps` score from current spot prices and pool fees
-- run a lightweight local in-tick simulation before spending exact quotes
+- run multi-tick local simulation across loaded initialized ticks before spending exact quotes
 - search a small local `amountIn` ladder, then refine around the best rung before choosing a size
-- bootstrap nearest initialized tick bounds and use them in local boundary checks
+- bootstrap initialized ticks around each active pool and apply live liquidityNet changes
 - optionally exact-quote a small shortlist through `QuoterV2`
 - limit exact quotes with per-block budget and per-ring dedupe
 - precompute per-triangle executor route templates for fast calldata construction after exact quote
@@ -23,7 +23,7 @@ This first version does:
 
 This version does not do:
 
-- local tick-by-tick swap simulation
+- exact integer-equivalent Uniswap v3 simulation
 - gas-aware filtering
 - automatic execution
 
@@ -194,8 +194,7 @@ When `SCANNER_DEBUG_SUMMARY_ENABLED=true`, the scanner switches to summary outpu
 
 ## Next Steps
 
-1. Add `Mint` and `Burn` handling.
-2. Add richer shortlist controls such as cooldowns, token-specific budgets, and rough-score deltas.
-3. Replace most exact quotes with a deeper local simulator to stay within long-running RPC/CU budgets.
-4. Improve best-size search beyond the current discrete ladder, for example with denser ladders or local refinement around the best rung.
-5. Submit the prepared executor calldata through a real transaction sender with nonce/gas policy tuned for sub-200ms reaction time.
+1. Add richer shortlist controls such as cooldowns, token-specific budgets, and rough-score deltas.
+2. Move local swap math closer to exact Uniswap v3 fixed-point behavior.
+3. Improve best-size search beyond the current discrete ladder, for example with denser ladders or local refinement around the best rung.
+4. Submit the prepared executor calldata through a real transaction sender with nonce/gas policy tuned for sub-200ms reaction time.
