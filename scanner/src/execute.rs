@@ -357,7 +357,7 @@ mod tests {
             ],
             vec![500, 100, 100, 500],
         );
-        let builder = ExecutionBuilder::new(&[four_hop.clone()], 0).expect("builder");
+        let builder = ExecutionBuilder::new(std::slice::from_ref(&four_hop), 0).expect("builder");
         let plan = builder
             .build_plan(&four_hop, U256::from(1u64), U256::from(2u64))
             .expect("plan");

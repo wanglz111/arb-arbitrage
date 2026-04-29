@@ -1,6 +1,8 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
-use ethers::types::Address;
+use ethers::types::{Address, U256};
+use num_bigint::BigUint;
+use num_traits::{One, Zero};
 
 use crate::{
     config::TokenDef,
@@ -8,10 +10,13 @@ use crate::{
     state::{PoolState, ScannerState},
 };
 
-const Q96_F64: f64 = 79_228_162_514_264_337_593_543_950_336.0;
 const LOCAL_REFINE_ROUNDS: usize = 2;
 const LOCAL_TERNARY_ROUNDS: usize = 12;
 const MAX_TICK_CROSSES_PER_LEG: usize = 256;
+const Q96: u128 = 1u128 << 96;
+const FEE_DENOMINATOR: u32 = 1_000_000;
+const MIN_TICK: i32 = -887272;
+const MAX_TICK: i32 = 887272;
 
 #[derive(Clone, Debug)]
 pub struct LocalQuoteResult {
@@ -31,7 +36,7 @@ pub struct LocalQuoteResult {
 
 #[derive(Clone, Debug)]
 pub struct LocalLegResult {
-    pub amount_out: f64,
+    pub amount_out_raw: u128,
     pub crosses_tick: bool,
     pub headroom_ratio: f64,
 }
@@ -232,34 +237,34 @@ pub fn simulate_triangle_amount(
         return None;
     }
 
-    let mut amount = amount_in;
+    let mut amount_raw = amount_in_raw;
     let mut crossed_tick_legs = 0u8;
     let mut max_headroom_ratio = 0.0f64;
     for leg in triangle.legs() {
         let pool_state = state.pools.get(&leg.pool)?;
-        let leg_result = pool_state.simulate_swap_raw(amount, leg.token_in, leg.token_out)?;
+        let leg_result = pool_state.simulate_swap_raw(amount_raw, leg.token_in, leg.token_out)?;
         if leg_result.crosses_tick {
             crossed_tick_legs = crossed_tick_legs.saturating_add(1);
         }
         max_headroom_ratio = max_headroom_ratio.max(leg_result.headroom_ratio);
-        amount = leg_result.amount_out;
-        if !amount.is_finite() || amount <= 0.0 {
+        amount_raw = leg_result.amount_out_raw;
+        if amount_raw == 0 {
             return None;
         }
     }
 
-    let amount_out_raw_floor = amount.floor();
-    if !amount_out_raw_floor.is_finite() || amount_out_raw_floor <= 0.0 {
+    if amount_raw == 0 {
         return None;
     }
+    let amount_out = amount_raw as f64;
 
     Some(LocalQuoteResult {
         amount_in_raw,
-        amount_out_raw_floor: amount_out_raw_floor as u128,
+        amount_out_raw_floor: amount_raw,
         amount_in,
-        amount_out: amount,
-        gross_profit: amount - amount_in,
-        edge_bps: ((amount / amount_in) - 1.0) * 10_000.0,
+        amount_out,
+        gross_profit: amount_out - amount_in,
+        edge_bps: ((amount_out / amount_in) - 1.0) * 10_000.0,
         size_bps,
         search_samples: 0,
         refinement_samples: 0,
@@ -272,238 +277,118 @@ pub fn simulate_triangle_amount(
 impl PoolState {
     pub fn simulate_swap_raw(
         &self,
-        amount_in_raw: f64,
+        amount_in_raw: u128,
         token_in: Address,
         token_out: Address,
     ) -> Option<LocalLegResult> {
-        if amount_in_raw <= 0.0 {
-            return None;
-        }
-
-        let fee_factor = 1.0 - (self.pool.fee as f64 / 1_000_000.0);
-        let amount_in_less_fee = amount_in_raw * fee_factor;
-        if amount_in_less_fee <= 0.0 {
-            return None;
-        }
-
-        let sqrt_price = self.sqrt_price_x96.to_string().parse::<f64>().ok()? / Q96_F64;
-        let mut liquidity = self.liquidity as f64;
-
-        if !sqrt_price.is_finite()
-            || sqrt_price <= 0.0
-            || !liquidity.is_finite()
-            || liquidity <= 0.0
-        {
+        if amount_in_raw == 0 || self.liquidity == 0 || self.sqrt_price_x96.is_zero() {
             return None;
         }
 
         if token_in == self.pool.token0 && token_out == self.pool.token1 {
-            return simulate_zero_for_one(self, amount_in_less_fee, sqrt_price, &mut liquidity);
+            return simulate_exact_input(self, amount_in_raw, true);
         }
 
         if token_in == self.pool.token1 && token_out == self.pool.token0 {
-            return simulate_one_for_zero(self, amount_in_less_fee, sqrt_price, &mut liquidity);
+            return simulate_exact_input(self, amount_in_raw, false);
         }
 
         None
     }
 }
 
-fn simulate_zero_for_one(
+fn simulate_exact_input(
     pool: &PoolState,
-    mut amount_remaining: f64,
-    mut sqrt_price: f64,
-    liquidity: &mut f64,
+    amount_in_raw: u128,
+    zero_for_one: bool,
 ) -> Option<LocalLegResult> {
-    let mut amount_out = 0.0f64;
+    let mut amount_remaining = U256::from(amount_in_raw);
+    let mut amount_out = U256::zero();
+    let mut sqrt_price = pool.sqrt_price_x96;
+    let mut liquidity = pool.liquidity;
     let mut current_tick = pool.tick;
     let mut crossed_ticks = 0usize;
     let mut max_headroom_ratio = 0.0f64;
 
     for _ in 0..=MAX_TICK_CROSSES_PER_LEG {
-        if amount_remaining <= 0.0 {
+        if amount_remaining.is_zero() {
             break;
         }
 
-        let Some(next_tick) = pool.next_initialized_tick_below(current_tick) else {
-            let sqrt_lower =
-                sqrt_ratio_at_tick(current_tick_lower(current_tick, pool.tick_spacing));
-            return finish_zero_for_one_without_loaded_tick(
-                amount_remaining,
-                amount_out,
-                sqrt_price,
-                *liquidity,
-                sqrt_lower,
-                crossed_ticks,
-                max_headroom_ratio,
-            );
-        };
-        let sqrt_target = sqrt_ratio_at_tick(next_tick);
-        let max_amount_in = *liquidity * ((1.0 / sqrt_target) - (1.0 / sqrt_price));
+        let (sqrt_target, initialized_tick) =
+            next_sqrt_price_target(pool, current_tick, zero_for_one, sqrt_price)?;
+        let step = compute_swap_step(
+            sqrt_price,
+            sqrt_target,
+            liquidity,
+            amount_remaining,
+            pool.pool.fee,
+        )?;
+        let max_amount_in = step.amount_in.saturating_add(step.fee_amount);
         max_headroom_ratio =
-            max_headroom_ratio.max(headroom_ratio(amount_remaining, max_amount_in));
+            max_headroom_ratio.max(headroom_ratio_u256(amount_remaining, max_amount_in));
 
-        if amount_remaining < max_amount_in {
-            let inv_next = (1.0 / sqrt_price) + (amount_remaining / *liquidity);
-            if !inv_next.is_finite() || inv_next <= 0.0 {
+        sqrt_price = step.sqrt_price_next;
+        amount_remaining = amount_remaining.checked_sub(max_amount_in)?;
+        amount_out = amount_out.checked_add(step.amount_out)?;
+
+        if sqrt_price == sqrt_target {
+            if let Some(next_tick) = initialized_tick {
+                crossed_ticks += 1;
+                let liquidity_net = pool.initialized_ticks.get(&next_tick).copied()?;
+                liquidity = cross_liquidity(liquidity, liquidity_net, zero_for_one)?;
+                if liquidity == 0 {
+                    return None;
+                }
+                current_tick = if zero_for_one {
+                    next_tick.saturating_sub(1)
+                } else {
+                    next_tick
+                };
+            } else if amount_remaining > U256::zero() {
                 return None;
             }
-
-            let sqrt_price_next = 1.0 / inv_next;
-            amount_out += *liquidity * (sqrt_price - sqrt_price_next);
-            amount_remaining = 0.0;
-            break;
+        } else {
+            current_tick = get_tick_at_sqrt_ratio(sqrt_price)?;
         }
-
-        amount_remaining -= max_amount_in;
-        amount_out += *liquidity * (sqrt_price - sqrt_target);
-        sqrt_price = sqrt_target;
-        crossed_ticks += 1;
-        let liquidity_net = pool.initialized_ticks.get(&next_tick).copied()?;
-        *liquidity = apply_crossed_liquidity(*liquidity, -liquidity_net);
-        if *liquidity <= 0.0 {
-            return None;
-        }
-        current_tick = next_tick;
     }
 
-    if amount_remaining > 0.0 {
+    if !amount_remaining.is_zero() {
         return None;
     }
 
+    if amount_out > U256::from(u128::MAX) {
+        return None;
+    }
+    let amount_out_raw = amount_out.as_u128();
     Some(LocalLegResult {
-        amount_out: positive_finite(amount_out)?,
+        amount_out_raw,
         crosses_tick: crossed_ticks > 0,
         headroom_ratio: max_headroom_ratio,
     })
 }
 
-fn simulate_one_for_zero(
+fn next_sqrt_price_target(
     pool: &PoolState,
-    mut amount_remaining: f64,
-    mut sqrt_price: f64,
-    liquidity: &mut f64,
-) -> Option<LocalLegResult> {
-    let mut amount_out = 0.0f64;
-    let mut current_tick = pool.tick;
-    let mut crossed_ticks = 0usize;
-    let mut max_headroom_ratio = 0.0f64;
-
-    for _ in 0..=MAX_TICK_CROSSES_PER_LEG {
-        if amount_remaining <= 0.0 {
-            break;
+    current_tick: i32,
+    zero_for_one: bool,
+    sqrt_price: U256,
+) -> Option<(U256, Option<i32>)> {
+    if zero_for_one {
+        if let Some(next_tick) = pool.next_initialized_tick_below(current_tick) {
+            return Some((get_sqrt_ratio_at_tick(next_tick)?, Some(next_tick)));
         }
-
-        let Some(next_tick) = pool.next_initialized_tick_above(current_tick) else {
-            let sqrt_upper = sqrt_ratio_at_tick(
-                current_tick_lower(current_tick, pool.tick_spacing) + pool.tick_spacing,
-            );
-            return finish_one_for_zero_without_loaded_tick(
-                amount_remaining,
-                amount_out,
-                sqrt_price,
-                *liquidity,
-                sqrt_upper,
-                crossed_ticks,
-                max_headroom_ratio,
-            );
-        };
-        let sqrt_target = sqrt_ratio_at_tick(next_tick);
-        let max_amount_in = *liquidity * (sqrt_target - sqrt_price);
-        max_headroom_ratio =
-            max_headroom_ratio.max(headroom_ratio(amount_remaining, max_amount_in));
-
-        if amount_remaining < max_amount_in {
-            let sqrt_price_next = sqrt_price + (amount_remaining / *liquidity);
-            if !sqrt_price_next.is_finite() || sqrt_price_next <= 0.0 {
-                return None;
-            }
-
-            amount_out += *liquidity * ((1.0 / sqrt_price) - (1.0 / sqrt_price_next));
-            amount_remaining = 0.0;
-            break;
-        }
-
-        amount_remaining -= max_amount_in;
-        amount_out += *liquidity * ((1.0 / sqrt_price) - (1.0 / sqrt_target));
-        sqrt_price = sqrt_target;
-        crossed_ticks += 1;
-        let liquidity_net = pool.initialized_ticks.get(&next_tick).copied()?;
-        *liquidity = apply_crossed_liquidity(*liquidity, liquidity_net);
-        if *liquidity <= 0.0 {
-            return None;
-        }
-        current_tick = next_tick;
+        let fallback_tick = current_tick_lower(current_tick, pool.tick_spacing);
+        let fallback = get_sqrt_ratio_at_tick(fallback_tick.max(MIN_TICK))?;
+        return (fallback < sqrt_price).then_some((fallback, None));
     }
 
-    if amount_remaining > 0.0 {
-        return None;
+    if let Some(next_tick) = pool.next_initialized_tick_above(current_tick) {
+        return Some((get_sqrt_ratio_at_tick(next_tick)?, Some(next_tick)));
     }
-
-    Some(LocalLegResult {
-        amount_out: positive_finite(amount_out)?,
-        crosses_tick: crossed_ticks > 0,
-        headroom_ratio: max_headroom_ratio,
-    })
-}
-
-fn finish_zero_for_one_without_loaded_tick(
-    amount_remaining: f64,
-    amount_out_so_far: f64,
-    sqrt_price: f64,
-    liquidity: f64,
-    sqrt_lower: f64,
-    crossed_ticks: usize,
-    max_headroom_ratio: f64,
-) -> Option<LocalLegResult> {
-    let max_amount_in = liquidity * ((1.0 / sqrt_lower) - (1.0 / sqrt_price));
-    let headroom = max_headroom_ratio.max(headroom_ratio(amount_remaining, max_amount_in));
-    if amount_remaining > max_amount_in {
-        return None;
-    }
-
-    let inv_next = (1.0 / sqrt_price) + (amount_remaining / liquidity);
-    if !inv_next.is_finite() || inv_next <= 0.0 {
-        return None;
-    }
-
-    let sqrt_price_next = 1.0 / inv_next;
-    Some(LocalLegResult {
-        amount_out: positive_finite(
-            amount_out_so_far + liquidity * (sqrt_price - sqrt_price_next),
-        )?,
-        crosses_tick: crossed_ticks > 0,
-        headroom_ratio: headroom,
-    })
-}
-
-fn finish_one_for_zero_without_loaded_tick(
-    amount_remaining: f64,
-    amount_out_so_far: f64,
-    sqrt_price: f64,
-    liquidity: f64,
-    sqrt_upper: f64,
-    crossed_ticks: usize,
-    max_headroom_ratio: f64,
-) -> Option<LocalLegResult> {
-    let max_amount_in = liquidity * (sqrt_upper - sqrt_price);
-    let headroom = max_headroom_ratio.max(headroom_ratio(amount_remaining, max_amount_in));
-    if amount_remaining > max_amount_in {
-        return None;
-    }
-
-    let sqrt_price_next = sqrt_price + (amount_remaining / liquidity);
-    if !sqrt_price_next.is_finite() || sqrt_price_next <= 0.0 {
-        return None;
-    }
-
-    Some(LocalLegResult {
-        amount_out: positive_finite(
-            amount_out_so_far + liquidity * ((1.0 / sqrt_price) - (1.0 / sqrt_price_next)),
-        )?,
-        crosses_tick: crossed_ticks > 0,
-        headroom_ratio: headroom,
-    })
+    let fallback_tick = current_tick_lower(current_tick, pool.tick_spacing) + pool.tick_spacing;
+    let fallback = get_sqrt_ratio_at_tick(fallback_tick.min(MAX_TICK))?;
+    (fallback > sqrt_price).then_some((fallback, None))
 }
 
 impl PoolState {
@@ -522,8 +407,18 @@ impl PoolState {
     }
 }
 
-fn apply_crossed_liquidity(liquidity: f64, liquidity_delta: i128) -> f64 {
-    liquidity + liquidity_delta as f64
+fn cross_liquidity(liquidity: u128, liquidity_net: i128, zero_for_one: bool) -> Option<u128> {
+    let delta = if zero_for_one {
+        liquidity_net.checked_neg()?
+    } else {
+        liquidity_net
+    };
+
+    if delta >= 0 {
+        liquidity.checked_add(delta as u128)
+    } else {
+        liquidity.checked_sub((-delta) as u128)
+    }
 }
 
 fn current_tick_lower(current_tick: i32, tick_spacing: i32) -> i32 {
@@ -531,24 +426,299 @@ fn current_tick_lower(current_tick: i32, tick_spacing: i32) -> i32 {
     current_tick.div_euclid(spacing) * spacing
 }
 
-fn sqrt_ratio_at_tick(tick: i32) -> f64 {
-    1.0001_f64.powf(f64::from(tick) / 2.0)
-}
-
-fn headroom_ratio(amount_in_less_fee: f64, max_amount_in_less_fee: f64) -> f64 {
-    if max_amount_in_less_fee.is_finite() && max_amount_in_less_fee > 0.0 {
-        amount_in_less_fee / max_amount_in_less_fee
+fn headroom_ratio_u256(amount_remaining: U256, max_amount_in: U256) -> f64 {
+    if !max_amount_in.is_zero() {
+        let remaining = amount_remaining
+            .to_string()
+            .parse::<f64>()
+            .unwrap_or(f64::INFINITY);
+        let max_in = max_amount_in
+            .to_string()
+            .parse::<f64>()
+            .unwrap_or(f64::INFINITY);
+        remaining / max_in
     } else {
         f64::INFINITY
     }
 }
 
-fn positive_finite(value: f64) -> Option<f64> {
-    if value.is_finite() && value > 0.0 {
-        Some(value)
+#[derive(Clone, Debug)]
+struct SwapStep {
+    sqrt_price_next: U256,
+    amount_in: U256,
+    amount_out: U256,
+    fee_amount: U256,
+}
+
+fn compute_swap_step(
+    sqrt_price_current: U256,
+    sqrt_price_target: U256,
+    liquidity: u128,
+    amount_remaining: U256,
+    fee_pips: u32,
+) -> Option<SwapStep> {
+    let zero_for_one = sqrt_price_current >= sqrt_price_target;
+    let fee_complement = FEE_DENOMINATOR.checked_sub(fee_pips)?;
+    let amount_remaining_less_fee = mul_div(
+        amount_remaining,
+        U256::from(fee_complement),
+        U256::from(FEE_DENOMINATOR),
+    )?;
+    let amount_in_to_target = if zero_for_one {
+        get_amount0_delta(sqrt_price_target, sqrt_price_current, liquidity, true)?
     } else {
-        None
+        get_amount1_delta(sqrt_price_current, sqrt_price_target, liquidity, true)?
+    };
+
+    let sqrt_price_next = if amount_remaining_less_fee >= amount_in_to_target {
+        sqrt_price_target
+    } else {
+        get_next_sqrt_price_from_input(
+            sqrt_price_current,
+            liquidity,
+            amount_remaining_less_fee,
+            zero_for_one,
+        )?
+    };
+    let reached_target = sqrt_price_next == sqrt_price_target;
+
+    let amount_in = if reached_target {
+        amount_in_to_target
+    } else if zero_for_one {
+        get_amount0_delta(sqrt_price_next, sqrt_price_current, liquidity, true)?
+    } else {
+        get_amount1_delta(sqrt_price_current, sqrt_price_next, liquidity, true)?
+    };
+    let amount_out = if zero_for_one {
+        get_amount1_delta(sqrt_price_next, sqrt_price_current, liquidity, false)?
+    } else {
+        get_amount0_delta(sqrt_price_current, sqrt_price_next, liquidity, false)?
+    };
+    let fee_amount = if reached_target {
+        mul_div_rounding_up(amount_in, U256::from(fee_pips), U256::from(fee_complement))?
+    } else {
+        amount_remaining.checked_sub(amount_in)?
+    };
+
+    Some(SwapStep {
+        sqrt_price_next,
+        amount_in,
+        amount_out,
+        fee_amount,
+    })
+}
+
+fn get_next_sqrt_price_from_input(
+    sqrt_price_x96: U256,
+    liquidity: u128,
+    amount_in: U256,
+    zero_for_one: bool,
+) -> Option<U256> {
+    if zero_for_one {
+        get_next_sqrt_price_from_amount0_rounding_up(sqrt_price_x96, liquidity, amount_in)
+    } else {
+        let quotient = mul_div(amount_in, U256::from(Q96), U256::from(liquidity))?;
+        sqrt_price_x96.checked_add(quotient)
     }
+}
+
+fn get_next_sqrt_price_from_amount0_rounding_up(
+    sqrt_price_x96: U256,
+    liquidity: u128,
+    amount: U256,
+) -> Option<U256> {
+    if amount.is_zero() {
+        return Some(sqrt_price_x96);
+    }
+
+    let numerator1 = U256::from(liquidity) << 96;
+    let product = checked_mul_big(amount, sqrt_price_x96);
+    let denominator = checked_add_big(u256_to_big(numerator1), product);
+    big_to_u256_roundtrip(mul_div_rounding_up_big(
+        u256_to_big(numerator1),
+        u256_to_big(sqrt_price_x96),
+        denominator,
+    )?)
+}
+
+fn get_amount0_delta(
+    sqrt_ratio_a_x96: U256,
+    sqrt_ratio_b_x96: U256,
+    liquidity: u128,
+    round_up: bool,
+) -> Option<U256> {
+    let (lower, upper) = ordered_ratios(sqrt_ratio_a_x96, sqrt_ratio_b_x96);
+    if lower.is_zero() {
+        return None;
+    }
+    let numerator1 = u256_to_big(U256::from(liquidity) << 96);
+    let numerator2 = u256_to_big(upper.checked_sub(lower)?);
+    let upper_big = u256_to_big(upper);
+    let lower_big = u256_to_big(lower);
+
+    let value = if round_up {
+        div_rounding_up_big(
+            mul_div_rounding_up_big(numerator1, numerator2, upper_big)?,
+            lower_big,
+        )
+    } else {
+        (numerator1 * numerator2 / upper_big) / lower_big
+    };
+    big_to_u256_roundtrip(value)
+}
+
+fn get_amount1_delta(
+    sqrt_ratio_a_x96: U256,
+    sqrt_ratio_b_x96: U256,
+    liquidity: u128,
+    round_up: bool,
+) -> Option<U256> {
+    let (lower, upper) = ordered_ratios(sqrt_ratio_a_x96, sqrt_ratio_b_x96);
+    let delta = upper.checked_sub(lower)?;
+    if round_up {
+        mul_div_rounding_up(U256::from(liquidity), delta, U256::from(Q96))
+    } else {
+        mul_div(U256::from(liquidity), delta, U256::from(Q96))
+    }
+}
+
+fn ordered_ratios(a: U256, b: U256) -> (U256, U256) {
+    if a > b { (b, a) } else { (a, b) }
+}
+
+fn mul_div(a: U256, b: U256, denominator: U256) -> Option<U256> {
+    if denominator.is_zero() {
+        return None;
+    }
+    big_to_u256_roundtrip(u256_to_big(a) * u256_to_big(b) / u256_to_big(denominator))
+}
+
+fn mul_div_rounding_up(a: U256, b: U256, denominator: U256) -> Option<U256> {
+    if denominator.is_zero() {
+        return None;
+    }
+    big_to_u256_roundtrip(mul_div_rounding_up_big(
+        u256_to_big(a),
+        u256_to_big(b),
+        u256_to_big(denominator),
+    )?)
+}
+
+fn mul_div_rounding_up_big(a: BigUint, b: BigUint, denominator: BigUint) -> Option<BigUint> {
+    if denominator.is_zero() {
+        return None;
+    }
+    let product = a * b;
+    let quotient = &product / &denominator;
+    let remainder = product % denominator;
+    Some(if remainder.is_zero() {
+        quotient
+    } else {
+        quotient + BigUint::one()
+    })
+}
+
+fn div_rounding_up_big(numerator: BigUint, denominator: BigUint) -> BigUint {
+    let quotient = &numerator / &denominator;
+    let remainder = numerator % denominator;
+    if remainder.is_zero() {
+        quotient
+    } else {
+        quotient + BigUint::one()
+    }
+}
+
+fn checked_mul_big(a: U256, b: U256) -> BigUint {
+    u256_to_big(a) * u256_to_big(b)
+}
+
+fn checked_add_big(a: BigUint, b: BigUint) -> BigUint {
+    a + b
+}
+
+fn u256_to_big(value: U256) -> BigUint {
+    let mut bytes = [0u8; 32];
+    value.to_big_endian(&mut bytes);
+    BigUint::from_bytes_be(&bytes)
+}
+
+fn big_to_u256_roundtrip(value: BigUint) -> Option<U256> {
+    if value.bits() > 256 {
+        return None;
+    }
+    let bytes = value.to_bytes_be();
+    Some(U256::from_big_endian(&bytes))
+}
+
+fn get_sqrt_ratio_at_tick(tick: i32) -> Option<U256> {
+    if !(MIN_TICK..=MAX_TICK).contains(&tick) {
+        return None;
+    }
+
+    let abs_tick = tick.unsigned_abs();
+    let mut ratio = if (abs_tick & 0x1) != 0 {
+        hex_u256("fffcb933bd6fad37aa2d162d1a594001")?
+    } else {
+        hex_u256("100000000000000000000000000000000")?
+    };
+
+    const FACTORS: &[(u32, &str)] = &[
+        (0x2, "fff97272373d413259a46990580e213a"),
+        (0x4, "fff2e50f5f656932ef12357cf3c7fdcc"),
+        (0x8, "ffe5caca7e10e4e61c3624eaa0941cd0"),
+        (0x10, "ffcb9843d60f6159c9db58835c926644"),
+        (0x20, "ff973b41fa98c081472e6896dfb254c0"),
+        (0x40, "ff2ea16466c96a3843ec78b326b52861"),
+        (0x80, "fe5dee046a99a2a811c461f1969c3053"),
+        (0x100, "fcbe86c7900a88aedcffc83b479aa3a4"),
+        (0x200, "f987a7253ac413176f2b074cf7815e54"),
+        (0x400, "f3392b0822b70005940c7a398e4b70f3"),
+        (0x800, "e7159475a2c29b7443b29c7fa6e889d9"),
+        (0x1000, "d097f3bdfd2022b8845ad8f792aa5825"),
+        (0x2000, "a9f746462d870fdf8a65dc1f90e061e5"),
+        (0x4000, "70d869a156d2a1b890bb3df62baf32f7"),
+        (0x8000, "31be135f97d08fd981231505542fcfa6"),
+        (0x10000, "9aa508b5b7a84e1c677de54f3e99bc9"),
+        (0x20000, "5d6af8dedb81196699c329225ee604"),
+        (0x40000, "2216e584f5fa1ea926041bedfe98"),
+        (0x80000, "48a170391f7dc42444e8fa2"),
+    ];
+
+    for (mask, factor) in FACTORS {
+        if (abs_tick & mask) != 0 {
+            ratio = (ratio.checked_mul(hex_u256(factor)?)?) >> 128;
+        }
+    }
+
+    if tick > 0 {
+        ratio = U256::MAX / ratio;
+    }
+
+    let shifted = ratio >> 32;
+    let rounded = if ratio & U256::from((1u128 << 32) - 1) == U256::zero() {
+        shifted
+    } else {
+        shifted.checked_add(U256::one())?
+    };
+    Some(rounded)
+}
+
+fn get_tick_at_sqrt_ratio(sqrt_price_x96: U256) -> Option<i32> {
+    let mut low = MIN_TICK;
+    let mut high = MAX_TICK;
+    while low < high {
+        let mid = high - ((high - low) / 2);
+        if get_sqrt_ratio_at_tick(mid)? <= sqrt_price_x96 {
+            low = mid;
+        } else {
+            high = mid - 1;
+        }
+    }
+    Some(low)
+}
+
+fn hex_u256(raw: &str) -> Option<U256> {
+    U256::from_str_radix(raw, 16).ok()
 }
 
 fn build_candidate_sizes(base_amount_in: u128, size_bps: &[u32]) -> Vec<(u128, u32)> {
@@ -857,12 +1027,42 @@ mod tests {
         );
 
         let result = pool
-            .simulate_swap_raw(600.0, token1, token0)
+            .simulate_swap_raw(600, token1, token0)
             .expect("multi-tick quote");
 
         assert!(result.crosses_tick);
-        assert!(result.amount_out > 0.0);
+        assert!(result.amount_out_raw > 0);
         assert!(result.headroom_ratio > 1.0);
+    }
+
+    #[test]
+    fn tick_math_matches_uniswap_v3_boundaries() {
+        assert_eq!(
+            get_sqrt_ratio_at_tick(0).expect("tick 0"),
+            U256::from_dec_str("79228162514264337593543950336").expect("q96")
+        );
+        assert_eq!(
+            get_sqrt_ratio_at_tick(MIN_TICK).expect("min tick"),
+            U256::from(4_295_128_739u64)
+        );
+        assert_eq!(
+            get_sqrt_ratio_at_tick(MAX_TICK).expect("max tick"),
+            U256::from_dec_str("1461446703485210103287273052203988822378723970342")
+                .expect("max sqrt")
+        );
+    }
+
+    #[test]
+    fn full_math_rounds_like_solidity_helpers() {
+        assert_eq!(
+            mul_div(U256::from(10u64), U256::from(10u64), U256::from(6u64)).expect("mul div"),
+            U256::from(16u64)
+        );
+        assert_eq!(
+            mul_div_rounding_up(U256::from(10u64), U256::from(10u64), U256::from(6u64))
+                .expect("mul div up"),
+            U256::from(17u64)
+        );
     }
 
     #[test]
