@@ -56,6 +56,7 @@ pub struct ScannerConfig {
     pub max_log_block_range: u64,
     pub ws_reconnect_delay: Duration,
     pub rpc_retry_delay: Duration,
+    pub heartbeat_interval: Duration,
     pub min_candidate_edge_bps: f64,
     pub min_local_edge_bps: f64,
     pub min_profit_usd: f64,
@@ -111,6 +112,10 @@ impl ScannerConfig {
             .unwrap_or_else(|_| "2000".to_string())
             .parse::<u64>()
             .context("failed to parse SCANNER_RPC_RETRY_MS")?;
+        let heartbeat_interval_secs = env::var("SCANNER_HEARTBEAT_SECS")
+            .unwrap_or_else(|_| "60".to_string())
+            .parse::<u64>()
+            .context("failed to parse SCANNER_HEARTBEAT_SECS")?;
         let min_candidate_edge_bps = env::var("SCANNER_MIN_EDGE_BPS")
             .unwrap_or_else(|_| "0".to_string())
             .parse::<f64>()
@@ -199,6 +204,7 @@ impl ScannerConfig {
             max_log_block_range,
             ws_reconnect_delay: Duration::from_millis(ws_reconnect_delay_ms),
             rpc_retry_delay: Duration::from_millis(rpc_retry_delay_ms),
+            heartbeat_interval: Duration::from_secs(heartbeat_interval_secs),
             min_candidate_edge_bps,
             min_local_edge_bps,
             min_profit_usd,

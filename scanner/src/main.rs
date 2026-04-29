@@ -232,7 +232,7 @@ impl<'a> CandidateProcessor<'a> {
         quote_throttle: &mut QuoteThrottle,
         execution_call_throttle: &mut QuoteThrottle,
         directional_writer: &mut Option<DirectionalJsonlWriter>,
-    ) {
+    ) -> u64 {
         let pool_address = event.pool();
         let block_number = event.block_number();
         let log_index = event.log_index();
@@ -242,7 +242,7 @@ impl<'a> CandidateProcessor<'a> {
             .iter()
             .find(|pool| pool.address == pool_address)
         else {
-            return;
+            return 0;
         };
         let event_kind = match &event {
             PoolStateEvent::Swap(_) => "swap",
@@ -276,7 +276,7 @@ impl<'a> CandidateProcessor<'a> {
                     "skipped stale event"
                 );
             }
-            return;
+            return 0;
         }
 
         if !self.config.debug_summary_enabled
@@ -315,7 +315,7 @@ impl<'a> CandidateProcessor<'a> {
             execution_call_throttle,
             directional_writer,
         )
-        .await;
+        .await
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -328,7 +328,7 @@ impl<'a> CandidateProcessor<'a> {
         quote_throttle: &mut QuoteThrottle,
         execution_call_throttle: &mut QuoteThrottle,
         directional_writer: &mut Option<DirectionalJsonlWriter>,
-    ) {
+    ) -> u64 {
         let shortlist = build_shortlist(
             self.graph,
             state,
@@ -336,6 +336,7 @@ impl<'a> CandidateProcessor<'a> {
             changed_pools,
             self.config,
         );
+        let mut directional_count = 0u64;
 
         for candidate in shortlist {
             let local_execution_plan = candidate.local_quote.as_ref().and_then(|quote| {
@@ -439,6 +440,7 @@ impl<'a> CandidateProcessor<'a> {
 
             if self.config.debug_summary_enabled {
                 if directional_candidate && passes_execution_call_requirement {
+                    directional_count = directional_count.saturating_add(1);
                     info_directional_candidate(
                         &candidate,
                         self.token_map,
@@ -464,6 +466,9 @@ impl<'a> CandidateProcessor<'a> {
                     }
                 }
             } else {
+                if directional_candidate && passes_execution_call_requirement {
+                    directional_count = directional_count.saturating_add(1);
+                }
                 info_triangle(
                     &candidate,
                     self.token_map,
@@ -475,6 +480,8 @@ impl<'a> CandidateProcessor<'a> {
                 );
             }
         }
+
+        directional_count
     }
 
     async fn maybe_simulate_execution_call(
@@ -521,6 +528,18 @@ struct BuildMetadata {
     git_sha: String,
     git_ref: String,
     created_at: String,
+}
+
+#[derive(Clone, Debug, Default)]
+struct RuntimeStats {
+    live_events: u64,
+    backfill_events: u64,
+    directional_candidates: u64,
+    last_live_event_block: Option<u64>,
+    last_backfill_event_block: Option<u64>,
+    last_backfill_from_block: Option<u64>,
+    last_backfill_to_block: Option<u64>,
+    last_backfill_update_count: u64,
 }
 
 #[tokio::main]
@@ -594,6 +613,7 @@ async fn main() -> Result<()> {
             triangles = graph.triangles.len(),
             poll_ms = config.poll_interval.as_millis(),
             backfill_poll_ms = backfill_poll_interval.as_millis(),
+            heartbeat_secs = config.heartbeat_interval.as_secs(),
             max_log_block_range = config.max_log_block_range,
             ws_live_logs = live_logs_enabled,
             rpc_retry_ms = config.rpc_retry_delay.as_millis(),
@@ -666,11 +686,15 @@ async fn main() -> Result<()> {
     let mut backfill_ticker = tokio::time::interval(backfill_poll_interval);
     backfill_ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     backfill_ticker.tick().await;
+    let mut heartbeat_ticker = tokio::time::interval(config.heartbeat_interval);
+    heartbeat_ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    heartbeat_ticker.tick().await;
     let mut directional_writer = if config.debug_summary_enabled {
         Some(DirectionalJsonlWriter::new(&config.debug_jsonl_path)?)
     } else {
         None
     };
+    let mut runtime_stats = RuntimeStats::default();
 
     loop {
         tokio::select! {
@@ -681,7 +705,8 @@ async fn main() -> Result<()> {
                 break;
             }
             Some(event) = recv_live_event(&mut live_receiver) => {
-                processor
+                let block_number = event.block_number();
+                let directional_count = processor
                     .apply_pool_event(
                         "live",
                         &mut state,
@@ -690,7 +715,12 @@ async fn main() -> Result<()> {
                         &mut execution_call_throttle,
                         &mut directional_writer,
                     )
-                .await;
+                    .await;
+                runtime_stats.live_events = runtime_stats.live_events.saturating_add(1);
+                runtime_stats.last_live_event_block = Some(block_number);
+                runtime_stats.directional_candidates = runtime_stats
+                    .directional_candidates
+                    .saturating_add(directional_count);
             }
             _ = backfill_ticker.tick() => {
                 let latest_block = fetch_latest_block_with_retry(provider.clone(), config.rpc_retry_delay).await;
@@ -722,6 +752,9 @@ async fn main() -> Result<()> {
                 };
 
                 if updates.is_empty() {
+                    runtime_stats.last_backfill_from_block = Some(next_block);
+                    runtime_stats.last_backfill_to_block = Some(latest_block);
+                    runtime_stats.last_backfill_update_count = 0;
                     next_block = latest_block.saturating_add(1);
                     continue;
                 }
@@ -744,8 +777,16 @@ async fn main() -> Result<()> {
                     );
                 }
 
+                runtime_stats.last_backfill_from_block = Some(next_block);
+                runtime_stats.last_backfill_to_block = Some(latest_block);
+                runtime_stats.last_backfill_update_count = updates.len() as u64;
+                runtime_stats.backfill_events = runtime_stats
+                    .backfill_events
+                    .saturating_add(updates.len() as u64);
+                runtime_stats.last_backfill_event_block = updates.last().map(PoolStateEvent::block_number);
+
                 for event in updates {
-                    processor
+                    let directional_count = processor
                         .apply_pool_event(
                             "backfill",
                             &mut state,
@@ -755,8 +796,26 @@ async fn main() -> Result<()> {
                             &mut directional_writer,
                         )
                         .await;
+                    runtime_stats.directional_candidates = runtime_stats
+                        .directional_candidates
+                        .saturating_add(directional_count);
                 }
                 next_block = latest_block.saturating_add(1);
+            }
+            _ = heartbeat_ticker.tick() => {
+                info!(
+                    live_events = runtime_stats.live_events,
+                    backfill_events = runtime_stats.backfill_events,
+                    directional_candidates = runtime_stats.directional_candidates,
+                    last_live_event_block = runtime_stats.last_live_event_block,
+                    last_backfill_event_block = runtime_stats.last_backfill_event_block,
+                    last_backfill_from_block = runtime_stats.last_backfill_from_block,
+                    last_backfill_to_block = runtime_stats.last_backfill_to_block,
+                    last_backfill_update_count = runtime_stats.last_backfill_update_count,
+                    next_backfill_block = next_block,
+                    ws_live_logs = live_logs_enabled,
+                    "scanner heartbeat"
+                );
             }
         }
     }
