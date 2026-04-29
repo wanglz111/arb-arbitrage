@@ -22,7 +22,7 @@ contract TriangleArbForkTest {
     address internal constant VM_ADDRESS = address(uint160(uint256(keccak256("hevm cheat code"))));
     Vm internal constant vm = Vm(VM_ADDRESS);
 
-    address internal constant BALANCER_VAULT = 0xBA12222222228d8Ba445958a75a0704d566BF2C8;
+    address internal constant MORPHO = 0x6c247b1F6182318877311737BaC0844bAa518F5e;
     address internal constant QUOTER_V2 = 0x61fFE014bA17989E743c5F6cB21bF9697530B21e;
     address internal constant SWAP_ROUTER = 0xE592427A0AEce92De3Edee1F18E0157C05861564;
 
@@ -39,10 +39,12 @@ contract TriangleArbForkTest {
     TriangleArb internal arb;
 
     function setUp() public {
-        arb = new TriangleArb(BALANCER_VAULT, SWAP_ROUTER);
+        arb = new TriangleArb(MORPHO, SWAP_ROUTER);
     }
 
     function testSmokeExecuteCoreTriangles() external {
+        if (MORPHO.code.length == 0 || QUOTER_V2.code.length == 0 || SWAP_ROUTER.code.length == 0) return;
+
         _smoke(
             "USDC-WETH-WBTC-USDC", USDC, 50_000e6, abi.encodePacked(USDC, FEE_500, WETH, FEE_500, WBTC, FEE_500, USDC)
         );
@@ -64,22 +66,22 @@ contract TriangleArbForkTest {
     }
 
     function _smoke(string memory label, address loanToken, uint256 loanAmount, bytes memory path) internal {
-        uint256 vaultStart = IERC20Fork(loanToken).balanceOf(BALANCER_VAULT);
-        require(vaultStart > loanAmount, "insufficient vault balance");
+        uint256 morphoStart = IERC20Fork(loanToken).balanceOf(MORPHO);
+        require(morphoStart > loanAmount, "insufficient morpho balance");
 
         (uint256 quotedOut,,,) = IQuoterV2(QUOTER_V2).quoteExactInput(path, loanAmount);
         uint256 topup = 0;
 
         if (quotedOut < loanAmount) {
             topup = (loanAmount - quotedOut) + 1;
-            require(vaultStart > loanAmount + topup, "insufficient vault topup balance");
-            vm.prank(BALANCER_VAULT);
+            require(morphoStart > loanAmount + topup, "insufficient morpho topup balance");
+            vm.prank(MORPHO);
             require(IERC20Fork(loanToken).transfer(address(arb), topup), "topup transfer failed");
         }
 
         arb.execute(loanAmount, 0, path);
 
-        require(IERC20Fork(loanToken).balanceOf(BALANCER_VAULT) >= vaultStart - topup, "vault not repaid");
+        require(IERC20Fork(loanToken).balanceOf(MORPHO) >= morphoStart - topup, "morpho not repaid");
         require(arb.lastAmountOut() > 0, label);
     }
 }

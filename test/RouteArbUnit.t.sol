@@ -40,29 +40,21 @@ contract MockRouteToken {
     }
 }
 
-contract MockBalancerVault {
-    function flashLoan(address recipient, address[] calldata tokens, uint256[] calldata amounts, bytes calldata userData)
-        external
-    {
-        require(tokens.length == 1 && amounts.length == 1, "single asset only");
-        MockRouteToken token = MockRouteToken(tokens[0]);
+contract MockMorphoRoute {
+    function flashLoan(address tokenAddress, uint256 assets, bytes calldata data) external {
+        MockRouteToken token = MockRouteToken(tokenAddress);
         uint256 balanceBefore = token.balanceOf(address(this));
-        require(token.transfer(recipient, amounts[0]), "loan transfer failed");
+        require(token.transfer(msg.sender, assets), "loan transfer failed");
 
-        uint256[] memory feeAmounts = new uint256[](1);
-        IBalancerFlashLoanRecipientRouteUnit(recipient).receiveFlashLoan(tokens, amounts, feeAmounts, userData);
+        IMorphoFlashLoanCallbackRouteUnit(msg.sender).onMorphoFlashLoan(assets, data);
 
+        require(token.transferFrom(msg.sender, address(this), assets), "repayment failed");
         require(token.balanceOf(address(this)) >= balanceBefore, "not repaid");
     }
 }
 
-interface IBalancerFlashLoanRecipientRouteUnit {
-    function receiveFlashLoan(
-        address[] calldata tokens,
-        uint256[] calldata amounts,
-        uint256[] calldata feeAmounts,
-        bytes calldata userData
-    ) external;
+interface IMorphoFlashLoanCallbackRouteUnit {
+    function onMorphoFlashLoan(uint256 assets, bytes calldata data) external;
 }
 
 contract MockSwapRouterRoute {
@@ -99,7 +91,7 @@ contract RouteArbUnitTest {
     address internal constant VM_ADDRESS = address(uint160(uint256(keccak256("hevm cheat code"))));
     VmRouteUnit internal constant vm = VmRouteUnit(VM_ADDRESS);
 
-    address internal constant BALANCER_VAULT = 0x0000000000000000000000000000000000001000;
+    address internal constant MORPHO = 0x0000000000000000000000000000000000001000;
     address internal constant SWAP_ROUTER = 0x0000000000000000000000000000000000002000;
     address internal constant USDC = 0xaf88d065e77c8cC2239327C5EDb3A432268e5831;
     address internal constant USDT0 = 0xFd086bC7CD5C481DCC9C85ebE478A1C0b69FCbb9;
@@ -113,7 +105,7 @@ contract RouteArbUnitTest {
     RouteArb internal arb;
 
     function setUp() public {
-        arb = new RouteArb(BALANCER_VAULT, SWAP_ROUTER, address(this));
+        arb = new RouteArb(MORPHO, SWAP_ROUTER, address(this));
     }
 
     function testSetRouteAcceptsFourHopClosedPath() external {
@@ -146,18 +138,18 @@ contract RouteArbUnitTest {
         require(!ok, "non-owner set route");
     }
 
-    function testExecuteUsesBalancerVaultAndPaysProfit() external {
+    function testExecuteUsesMorphoAndPaysProfit() external {
         MockRouteToken token = new MockRouteToken();
-        MockBalancerVault vault = new MockBalancerVault();
+        MockMorphoRoute morpho = new MockMorphoRoute();
         MockSwapRouterRoute router = new MockSwapRouterRoute(1);
-        RouteArb routeArb = new RouteArb(address(vault), address(router), address(this));
+        RouteArb routeArb = new RouteArb(address(morpho), address(router), address(this));
         bytes memory path = abi.encodePacked(address(token), FEE_500, USDT0, FEE_100, USDC, FEE_500, address(token));
 
-        token.mint(address(vault), 1_000);
+        token.mint(address(morpho), 1_000);
 
         routeArb.execute(100, 0, path);
 
-        require(token.balanceOf(address(vault)) == 1_000, "vault not repaid");
+        require(token.balanceOf(address(morpho)) == 1_000, "morpho not repaid");
         require(token.balanceOf(address(this)) == 1, "profit not paid");
         require(token.balanceOf(address(routeArb)) == 0, "executor retained token");
         require(routeArb.lastAmountOut() == 101, "last amount out");

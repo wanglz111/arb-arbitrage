@@ -6,18 +6,12 @@ interface IERC20RouteMinimal {
     function transfer(address to, uint256 amount) external returns (bool);
 }
 
-interface IBalancerVaultRouteMinimal {
-    function flashLoan(address recipient, address[] calldata tokens, uint256[] calldata amounts, bytes calldata userData)
-        external;
+interface IMorphoRouteMinimal {
+    function flashLoan(address token, uint256 assets, bytes calldata data) external;
 }
 
-interface IBalancerFlashLoanRecipientRouteMinimal {
-    function receiveFlashLoan(
-        address[] calldata tokens,
-        uint256[] calldata amounts,
-        uint256[] calldata feeAmounts,
-        bytes calldata userData
-    ) external;
+interface IMorphoFlashLoanCallbackRouteMinimal {
+    function onMorphoFlashLoan(uint256 assets, bytes calldata data) external;
 }
 
 interface ISwapRouterV3Route {
@@ -32,13 +26,13 @@ interface ISwapRouterV3Route {
     function exactInput(ExactInputParams calldata params) external payable returns (uint256 amountOut);
 }
 
-contract RouteArb is IBalancerFlashLoanRecipientRouteMinimal {
+contract RouteArb is IMorphoFlashLoanCallbackRouteMinimal {
     uint256 internal constant V3_FIRST_TOKEN_BYTES = 20;
     uint256 internal constant V3_NEXT_HOP_BYTES = 23;
     uint256 internal constant MIN_ROUTE_HOPS = 3;
     uint256 internal constant MAX_ROUTE_HOPS = 5;
 
-    address public immutable balancerVault;
+    address public immutable morpho;
     ISwapRouterV3Route public immutable swapRouter;
 
     address public owner;
@@ -64,12 +58,12 @@ contract RouteArb is IBalancerFlashLoanRecipientRouteMinimal {
         _;
     }
 
-    constructor(address balancerVault_, address swapRouter_, address profitRecipient_) {
-        require(balancerVault_ != address(0), "invalid vault");
+    constructor(address morpho_, address swapRouter_, address profitRecipient_) {
+        require(morpho_ != address(0), "invalid morpho");
         require(swapRouter_ != address(0), "invalid router");
         require(profitRecipient_ != address(0), "invalid recipient");
 
-        balancerVault = balancerVault_;
+        morpho = morpho_;
         swapRouter = ISwapRouterV3Route(swapRouter_);
         owner = msg.sender;
         profitRecipient = profitRecipient_;
@@ -103,20 +97,13 @@ contract RouteArb is IBalancerFlashLoanRecipientRouteMinimal {
         _executeMemory(routeId, loanAmount, amountOutMinimum, path);
     }
 
-    function receiveFlashLoan(
-        address[] calldata tokens,
-        uint256[] calldata amounts,
-        uint256[] calldata feeAmounts,
-        bytes calldata userData
-    ) external override {
-        require(msg.sender == balancerVault, "unexpected balancer callback");
-        require(tokens.length == 1 && amounts.length == 1 && feeAmounts.length == 1, "invalid flash loan");
+    function onMorphoFlashLoan(uint256 assets, bytes calldata data) external override {
+        require(msg.sender == morpho, "unexpected morpho callback");
 
-        (uint256 routeId, uint256 amountOutMinimum, bytes memory path) = abi.decode(userData, (uint256, uint256, bytes));
+        (uint256 routeId, uint256 amountOutMinimum, bytes memory path) = abi.decode(data, (uint256, uint256, bytes));
         _validateClosedV3PathMemory(path);
 
         address loanToken = _firstTokenFromMemory(path);
-        require(tokens[0] == loanToken, "unexpected loan token");
         _ensureApprovals(loanToken);
 
         uint256 amountOut = swapRouter.exactInput(
@@ -124,22 +111,21 @@ contract RouteArb is IBalancerFlashLoanRecipientRouteMinimal {
                 path: path,
                 recipient: address(this),
                 deadline: block.timestamp,
-                amountIn: amounts[0],
+                amountIn: assets,
                 amountOutMinimum: amountOutMinimum
             })
         );
 
         lastAmountOut = amountOut;
 
-        uint256 repayment = amounts[0] + feeAmounts[0];
-        require(IERC20RouteMinimal(loanToken).transfer(balancerVault, repayment), "vault repayment failed");
+        require(amountOut >= assets, "insufficient repayment");
 
-        uint256 profit = amountOut > repayment ? amountOut - repayment : 0;
+        uint256 profit = amountOut - assets;
         if (profit != 0) {
             require(IERC20RouteMinimal(loanToken).transfer(profitRecipient, profit), "profit transfer failed");
         }
 
-        emit FlashExecution(loanToken, routeId, amounts[0], amountOut, profit);
+        emit FlashExecution(loanToken, routeId, assets, amountOut, profit);
     }
 
     function _executeMemory(uint256 routeId, uint256 loanAmount, uint256 amountOutMinimum, bytes memory path) internal {
@@ -157,11 +143,7 @@ contract RouteArb is IBalancerFlashLoanRecipientRouteMinimal {
     }
 
     function _startFlashLoan(address loanToken, uint256 loanAmount, bytes memory data) internal {
-        address[] memory tokens = new address[](1);
-        tokens[0] = loanToken;
-        uint256[] memory amounts = new uint256[](1);
-        amounts[0] = loanAmount;
-        IBalancerVaultRouteMinimal(balancerVault).flashLoan(address(this), tokens, amounts, data);
+        IMorphoRouteMinimal(morpho).flashLoan(loanToken, loanAmount, data);
     }
 
     function _ensureApprovals(address token) internal {
@@ -170,6 +152,7 @@ contract RouteArb is IBalancerFlashLoanRecipientRouteMinimal {
         }
 
         require(IERC20RouteMinimal(token).approve(address(swapRouter), type(uint256).max), "router approve failed");
+        require(IERC20RouteMinimal(token).approve(morpho, type(uint256).max), "morpho approve failed");
         tokenApprovalsSet[token] = true;
     }
 

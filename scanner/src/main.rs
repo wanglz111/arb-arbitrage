@@ -17,7 +17,7 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use dotenvy::from_path;
 use ethers::providers::{Http, Middleware, Provider};
 use ethers::types::{Address, Bytes, U256};
@@ -91,6 +91,26 @@ struct CandidateEmission<'a> {
     execution_source: &'static str,
     execution_call: Option<&'a ExecutionCallReport>,
     block_number: u64,
+    trigger: &'a TriggerContext,
+}
+
+#[derive(Clone, Debug)]
+struct TriggerContext {
+    source: &'static str,
+    event_kind: &'static str,
+    pool_name: &'static str,
+    pool_address: Address,
+    block_number: u64,
+    log_index: u64,
+}
+
+struct RouteAnalysisContext<'a> {
+    graph: &'a TriangleGraph,
+    state: &'a ScannerState,
+    token_map: &'a HashMap<Address, TokenDef>,
+    config: &'a ScannerConfig,
+    execution_builder: &'a ExecutionBuilder,
+    quote_engine: Option<&'a QuoteEngine>,
 }
 
 impl DirectionalJsonlWriter {
@@ -129,6 +149,14 @@ impl DirectionalJsonlWriter {
         let record = json!({
             "ts_ms": now_ms,
             "block_number": emission.block_number,
+            "trigger": {
+                "source": emission.trigger.source,
+                "event": emission.trigger.event_kind,
+                "pool": emission.trigger.pool_name,
+                "pool_address": format!("{:?}", emission.trigger.pool_address),
+                "block_number": emission.trigger.block_number,
+                "log_index": emission.trigger.log_index,
+            },
             "triangle": candidate.triangle_label,
             "fees": candidate.fee_label,
             "start_token": start_token,
@@ -270,10 +298,19 @@ impl<'a> CandidateProcessor<'a> {
 
         let mut changed_pools = HashSet::new();
         changed_pools.insert(pool_address);
+        let trigger = TriggerContext {
+            source,
+            event_kind,
+            pool_name: pool.name,
+            pool_address,
+            block_number,
+            log_index,
+        };
         self.process_affected_triangles(
             state,
             &changed_pools,
             block_number,
+            &trigger,
             quote_throttle,
             execution_call_throttle,
             directional_writer,
@@ -281,11 +318,13 @@ impl<'a> CandidateProcessor<'a> {
         .await;
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn process_affected_triangles(
         &self,
         state: &ScannerState,
         changed_pools: &HashSet<Address>,
         block_number: u64,
+        trigger: &TriggerContext,
         quote_throttle: &mut QuoteThrottle,
         execution_call_throttle: &mut QuoteThrottle,
         directional_writer: &mut Option<DirectionalJsonlWriter>,
@@ -418,6 +457,7 @@ impl<'a> CandidateProcessor<'a> {
                             execution_source,
                             execution_call: execution_call_report.as_ref(),
                             block_number,
+                            trigger,
                         })
                     {
                         warn!(error = %error, "failed to write directional candidate jsonl");
@@ -530,24 +570,23 @@ async fn main() -> Result<()> {
         execution_builder: &execution_builder,
         execution_call_simulator: &execution_call_simulator,
     };
-    let mut live_receiver = watcher::spawn_live_pool_watcher(config.clone());
-    let mut quote_throttle = QuoteThrottle::new();
-    let mut execution_call_throttle = QuoteThrottle::new();
-    let live_logs_enabled = live_receiver.is_some();
+    let analyze_route_id = std::env::var("SCANNER_ANALYZE_ROUTE_ID")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .map(|value| {
+            value
+                .trim()
+                .parse::<usize>()
+                .context("failed to parse SCANNER_ANALYZE_ROUTE_ID")
+        })
+        .transpose()?;
+    let tracked_reserve_hint_usd: f64 = config.pools.iter().map(|pool| pool.reserve_usd_hint).sum();
+    let live_logs_enabled = config.log_ws_url.is_some();
     let backfill_poll_interval = if live_logs_enabled {
         config.ws_backfill_interval
     } else {
         config.poll_interval
     };
-    let mut backfill_ticker = tokio::time::interval(backfill_poll_interval);
-    backfill_ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-    backfill_ticker.tick().await;
-    let mut directional_writer = if config.debug_summary_enabled {
-        Some(DirectionalJsonlWriter::new(&config.debug_jsonl_path)?)
-    } else {
-        None
-    };
-    let tracked_reserve_hint_usd: f64 = config.pools.iter().map(|pool| pool.reserve_usd_hint).sum();
 
     if !config.debug_summary_enabled {
         info!(
@@ -590,7 +629,12 @@ async fn main() -> Result<()> {
         latest_block
     };
 
-    let mut state = ScannerState::bootstrap(provider.clone(), &config, latest_block).await?;
+    let bootstrap_config = analyze_route_id
+        .map(|route_id| route_bootstrap_config(&config, &graph, route_id))
+        .transpose()?
+        .unwrap_or_else(|| config.clone());
+    let mut state =
+        ScannerState::bootstrap(provider.clone(), &bootstrap_config, latest_block).await?;
     if !config.debug_summary_enabled {
         info!(
             block = latest_block,
@@ -598,6 +642,35 @@ async fn main() -> Result<()> {
             "bootstrap complete"
         );
     }
+
+    if let Some(route_id) = analyze_route_id {
+        analyze_route_once(
+            route_id,
+            latest_block,
+            &RouteAnalysisContext {
+                graph: &graph,
+                state: &state,
+                token_map: &token_map,
+                config: &config,
+                execution_builder: &execution_builder,
+                quote_engine: quote_engine.as_ref(),
+            },
+        )
+        .await?;
+        return Ok(());
+    }
+
+    let mut live_receiver = watcher::spawn_live_pool_watcher(config.clone());
+    let mut quote_throttle = QuoteThrottle::new();
+    let mut execution_call_throttle = QuoteThrottle::new();
+    let mut backfill_ticker = tokio::time::interval(backfill_poll_interval);
+    backfill_ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    backfill_ticker.tick().await;
+    let mut directional_writer = if config.debug_summary_enabled {
+        Some(DirectionalJsonlWriter::new(&config.debug_jsonl_path)?)
+    } else {
+        None
+    };
 
     loop {
         tokio::select! {
@@ -807,6 +880,126 @@ fn write_route_catalog_entry(
         .write_all(b"\n")
         .context("failed to write route catalog newline")?;
     Ok(())
+}
+
+async fn analyze_route_once(
+    route_id: usize,
+    block_number: u64,
+    context: &RouteAnalysisContext<'_>,
+) -> Result<()> {
+    if route_id == 0 {
+        bail!("SCANNER_ANALYZE_ROUTE_ID must be >= 1");
+    }
+
+    let triangle = context
+        .graph
+        .triangles
+        .get(route_id - 1)
+        .with_context(|| format!("unknown route_id {route_id}"))?;
+    let token_map = context.token_map;
+    let display = triangle.display_view(token_map);
+    let start_token = token_map
+        .get(&triangle.start_token)
+        .map(|token| token.symbol)
+        .unwrap_or("UNKNOWN");
+    let local_quote = simulate::find_best_local_size(
+        triangle,
+        context.state,
+        token_map,
+        &context.config.local_size_bps,
+    )
+    .with_context(|| format!("failed to locally simulate route_id {route_id}"))?;
+    let local_plan = context.execution_builder.build_plan(
+        triangle,
+        U256::from(local_quote.amount_in_raw),
+        U256::from(local_quote.amount_out_raw_floor),
+    )?;
+
+    let exact_quote = if context.config.exact_quote_enabled {
+        match context.quote_engine {
+            Some(engine) => Some(
+                engine
+                    .quote_triangle_amount(triangle, U256::from(local_quote.amount_in_raw))
+                    .await
+                    .context("exact quote failed")?,
+            ),
+            None => None,
+        }
+    } else {
+        None
+    };
+    let exact_plan = match exact_quote.as_ref() {
+        Some(result) => Some(context.execution_builder.build_plan(
+            triangle,
+            result.amount_in,
+            result.amount_out,
+        )?),
+        None => None,
+    };
+
+    let record = json!({
+        "route_id": route_id,
+        "block_number": block_number,
+        "label": display.label,
+        "fees": display.fee_label,
+        "loan_token": start_token,
+        "local": {
+            "amount_in_raw": local_quote.amount_in_raw.to_string(),
+            "amount_in": format_amount_f64(local_quote.amount_in, token_map, triangle.start_token),
+            "amount_out_raw_floor": local_quote.amount_out_raw_floor.to_string(),
+            "amount_out": format_amount(&U256::from(local_quote.amount_out_raw_floor), token_map, triangle.start_token),
+            "gross_profit_raw": format!("{:.0}", local_quote.gross_profit),
+            "gross_profit": format_amount_f64(local_quote.gross_profit, token_map, triangle.start_token),
+            "gross_profit_usd": amount_raw_to_usd(local_quote.gross_profit, token_map, triangle.start_token),
+            "edge_bps": local_quote.edge_bps,
+            "size_bps": local_quote.size_bps,
+            "search_samples": local_quote.search_samples,
+            "refinement_samples": local_quote.refinement_samples,
+            "crosses_tick": local_quote.crosses_tick,
+            "crossed_tick_legs": local_quote.crossed_tick_legs,
+            "max_headroom_ratio": local_quote.max_headroom_ratio,
+            "amount_out_minimum_raw": local_plan.amount_out_minimum.to_string(),
+            "execute_calldata": local_plan.calldata_hex(),
+            "execute_route_calldata": local_plan.route_calldata_hex(),
+        },
+        "exact": exact_quote.as_ref().map(|result| json!({
+            "amount_in_raw": result.amount_in.to_string(),
+            "amount_in": format_amount(&result.amount_in, token_map, triangle.start_token),
+            "amount_out_raw": result.amount_out.to_string(),
+            "amount_out": format_amount(&result.amount_out, token_map, triangle.start_token),
+            "gross_profit_usd": exact_profit_usd(result, token_map, triangle.start_token),
+            "edge_bps": exact_edge_bps(result),
+            "amount_out_minimum_raw": exact_plan.as_ref().map(|plan| plan.amount_out_minimum.to_string()),
+            "execute_route_calldata": exact_plan.as_ref().map(ExecutionPlan::route_calldata_hex),
+        })),
+    });
+
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&record).context("failed to encode route analysis")?
+    );
+    Ok(())
+}
+
+fn route_bootstrap_config(
+    config: &ScannerConfig,
+    graph: &TriangleGraph,
+    route_id: usize,
+) -> Result<ScannerConfig> {
+    if route_id == 0 {
+        bail!("SCANNER_ANALYZE_ROUTE_ID must be >= 1");
+    }
+
+    let triangle = graph
+        .triangles
+        .get(route_id - 1)
+        .with_context(|| format!("unknown route_id {route_id}"))?;
+    let route_pools: HashSet<_> = triangle.pools.iter().copied().collect();
+    let mut route_config = config.clone();
+    route_config
+        .pools
+        .retain(|pool| route_pools.contains(&pool.address));
+    Ok(route_config)
 }
 
 fn build_sample_execute_route_calldata(plan: &ExecutionPlan) -> String {

@@ -8,7 +8,7 @@ This repo is focused on one concrete goal: detect narrow Uniswap v3 closed-route
 
 - discover 3-5 hop closed-route arbitrage opportunities on Arbitrum quickly
 - minimize long-running RPC and Alchemy quota usage
-- use Balancer Vault flash loans as the preferred execution capital source
+- use Morpho free flash loans as the preferred execution capital source
 - prepare execution calldata fast enough for an eventual sub-`200ms` reaction path
 
 ## Current Status
@@ -115,7 +115,7 @@ More details are in [DEPLOYMENT.md](/Users/edy/lucas/arb-arbitrage/DEPLOYMENT.md
 - debug mode is quiet by default and only emits directional candidates, also saved as JSONL
 - default candidate emission requires at least `SCANNER_MIN_PROFIT_USD=1` estimated gross profit
 - executor `eth_call` confirmation is optional and rate-limited; enable it only after `RouteArb` is deployed and `SCANNER_EXECUTOR_ADDRESS` / `SCANNER_EXECUTOR_CALLER` are set
-- `RouteArb` constructor expects Balancer Vault `0xBA12222222228d8Ba445958a75a0704d566BF2C8` as its first argument on Arbitrum
+- `RouteArb` constructor expects Morpho `0x6c247b1F6182318877311737BaC0844bAa518F5e` as its first argument on Arbitrum
 
 ## Next Steps
 

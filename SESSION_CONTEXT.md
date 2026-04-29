@@ -1,6 +1,19 @@
 # Arbitrum Triangle Arbitrage Session Context
 
-Last updated: 2026-04-28
+Last updated: 2026-04-29
+
+## Flash Loan Provider Decision
+
+Current decision: use Morpho free flash loans as the primary and hardcoded execution capital source.
+
+- Arbitrum Morpho singleton: `0x6c247b1F6182318877311737BaC0844bAa518F5e`
+- `RouteArb` and `TriangleArb` constructors take the Morpho address as their first argument.
+- Do not switch the primary executor to Balancer, Aave, or another flash-loan source without an explicit new user instruction.
+- Rationale checked on 2026-04-29:
+  - Morpho flash loans are free by design.
+  - Balancer V2 flash-loan fee was also `0` on-chain at the checked Arbitrum block, but it is a governable protocol fee.
+  - For the current target assets, Morpho had materially deeper available balances than Balancer for `USDC`, `USDT0`, `WETH`, and `WBTC`.
+  - `cbBTC` was unavailable as a direct flash-loan asset on both Morpho and Balancer at the checked block.
 
 ## 2026-04-28 Autonomous Build Directive
 
@@ -646,17 +659,18 @@ After this execution-handoff pass, the most natural next build steps are:
   - validation:
     - `forge build`
     - `forge test --no-match-contract TriangleArbForkTest`
-- Switched the primary executor to Balancer Vault flash loans:
-  - `RouteArb` now implements `receiveFlashLoan(address[],uint256[],uint256[],bytes)`
-  - constructor first argument is now the Balancer Vault address
+- A short-lived Balancer Vault executor switch was made, then explicitly reverted by user direction.
+- Restored Morpho as the primary executor flash-loan provider:
+  - `RouteArb` implements `onMorphoFlashLoan(uint256,bytes)`.
+  - constructor first argument is the Morpho singleton address.
   - external scanner calldata remains unchanged:
     - `execute(uint256,uint256,bytes)`
     - `executeRoute(uint256,uint256,uint256)`
-  - callback now repays `amount + fee` directly to the vault and transfers only remaining profit to `profitRecipient`
-  - route execution now only approves the Uniswap V3 router; no flash lender allowance is needed
-  - `TriangleArb` compatibility wrapper now forwards `balancerVault` into `RouteArb`
-  - added a local mock Balancer Vault / ERC20 / router unit test for the full flash-loan execution path
-- Validation completed for Balancer executor switch:
+  - callback swaps through Uniswap V3, leaves the borrowed amount approved for Morpho repayment, and transfers only remaining profit to `profitRecipient`.
+  - route execution lazily approves both the Uniswap V3 router and Morpho per loan token.
+  - `TriangleArb` compatibility wrapper now forwards `morpho` into `RouteArb`.
+  - local unit coverage uses a mock Morpho / ERC20 / router path for the full flash-loan execution flow.
+- Validation completed for Morpho executor restoration:
   - `forge build`
   - `forge test --match-contract RouteArbUnitTest`
   - `forge test --no-match-contract TriangleArbForkTest`
