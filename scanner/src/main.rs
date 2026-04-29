@@ -902,24 +902,45 @@ async fn analyze_route_once(
         .get(&triangle.start_token)
         .map(|token| token.symbol)
         .unwrap_or("UNKNOWN");
-    let local_quote = simulate::find_best_local_size(
-        triangle,
-        context.state,
-        token_map,
-        &context.config.local_size_bps,
-    )
-    .with_context(|| format!("failed to locally simulate route_id {route_id}"))?;
-    let local_plan = context.execution_builder.build_plan(
-        triangle,
-        U256::from(local_quote.amount_in_raw),
-        U256::from(local_quote.amount_out_raw_floor),
-    )?;
+    let requested_amount_in_raw = analyze_amount_in_raw()?;
+    let local_quote = match requested_amount_in_raw {
+        Some(amount_in_raw) => {
+            simulate::simulate_triangle_amount(triangle, context.state, amount_in_raw, 10_000)
+        }
+        None => simulate::find_best_local_size(
+            triangle,
+            context.state,
+            token_map,
+            &context.config.local_size_bps,
+        ),
+    };
+    let quote_amount_in = local_quote
+        .as_ref()
+        .map(|quote| quote.amount_in_raw)
+        .or(requested_amount_in_raw)
+        .with_context(|| {
+            format!(
+                "failed to locally simulate route_id {route_id}; set SCANNER_ANALYZE_AMOUNT_IN_RAW to still run exact quote"
+            )
+        })?;
+    let local_plan = match local_quote.as_ref() {
+        Some(quote) => Some(context.execution_builder.build_plan(
+            triangle,
+            U256::from(quote.amount_in_raw),
+            U256::from(quote.amount_out_raw_floor),
+        )?),
+        None => None,
+    };
 
     let exact_quote = if context.config.exact_quote_enabled {
         match context.quote_engine {
             Some(engine) => Some(
                 engine
-                    .quote_triangle_amount(triangle, U256::from(local_quote.amount_in_raw))
+                    .quote_triangle_amount_at_block(
+                        triangle,
+                        U256::from(quote_amount_in),
+                        block_number,
+                    )
                     .await
                     .context("exact quote failed")?,
             ),
@@ -936,6 +957,10 @@ async fn analyze_route_once(
         )?),
         None => None,
     };
+    let diff = exact_quote
+        .as_ref()
+        .zip(local_quote.as_ref())
+        .map(|(exact, local)| quote_diff_json(local.amount_out_raw_floor, exact.amount_out));
 
     let record = json!({
         "route_id": route_id,
@@ -943,7 +968,14 @@ async fn analyze_route_once(
         "label": display.label,
         "fees": display.fee_label,
         "loan_token": start_token,
-        "local": {
+        "requested_amount_in_raw": requested_amount_in_raw.map(|amount| amount.to_string()),
+        "local_status": if local_quote.is_some() { "ok" } else { "failed" },
+        "local_failure_hint": if local_quote.is_some() {
+            None
+        } else {
+            Some("local simulation returned None; common causes are insufficient loaded initialized ticks, zero liquidity, invalid route state, or amount crossing beyond loaded tick range")
+        },
+        "local": local_quote.as_ref().map(|local_quote| json!({
             "amount_in_raw": local_quote.amount_in_raw.to_string(),
             "amount_in": format_amount_f64(local_quote.amount_in, token_map, triangle.start_token),
             "amount_out_raw_floor": local_quote.amount_out_raw_floor.to_string(),
@@ -958,10 +990,10 @@ async fn analyze_route_once(
             "crosses_tick": local_quote.crosses_tick,
             "crossed_tick_legs": local_quote.crossed_tick_legs,
             "max_headroom_ratio": local_quote.max_headroom_ratio,
-            "amount_out_minimum_raw": local_plan.amount_out_minimum.to_string(),
-            "execute_calldata": local_plan.calldata_hex(),
-            "execute_route_calldata": local_plan.route_calldata_hex(),
-        },
+            "amount_out_minimum_raw": local_plan.as_ref().map(|plan| plan.amount_out_minimum.to_string()),
+            "execute_calldata": local_plan.as_ref().map(ExecutionPlan::calldata_hex),
+            "execute_route_calldata": local_plan.as_ref().map(ExecutionPlan::route_calldata_hex),
+        })),
         "exact": exact_quote.as_ref().map(|result| json!({
             "amount_in_raw": result.amount_in.to_string(),
             "amount_in": format_amount(&result.amount_in, token_map, triangle.start_token),
@@ -972,6 +1004,7 @@ async fn analyze_route_once(
             "amount_out_minimum_raw": exact_plan.as_ref().map(|plan| plan.amount_out_minimum.to_string()),
             "execute_route_calldata": exact_plan.as_ref().map(ExecutionPlan::route_calldata_hex),
         })),
+        "diff": diff,
     });
 
     println!(
@@ -979,6 +1012,53 @@ async fn analyze_route_once(
         serde_json::to_string_pretty(&record).context("failed to encode route analysis")?
     );
     Ok(())
+}
+
+fn analyze_amount_in_raw() -> Result<Option<u128>> {
+    std::env::var("SCANNER_ANALYZE_AMOUNT_IN_RAW")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .map(|value| {
+            value
+                .trim()
+                .parse::<u128>()
+                .context("failed to parse SCANNER_ANALYZE_AMOUNT_IN_RAW")
+        })
+        .transpose()
+}
+
+fn quote_diff_json(local_amount_out: u128, exact_amount_out: U256) -> serde_json::Value {
+    let local = U256::from(local_amount_out);
+    let signed_raw_diff = if local >= exact_amount_out {
+        local
+            .checked_sub(exact_amount_out)
+            .map(|value| value.to_string())
+            .unwrap_or_else(|| "0".to_string())
+    } else {
+        exact_amount_out
+            .checked_sub(local)
+            .map(|value| format!("-{value}"))
+            .unwrap_or_else(|| "0".to_string())
+    };
+    let abs_raw_diff = if local >= exact_amount_out {
+        local.checked_sub(exact_amount_out)
+    } else {
+        exact_amount_out.checked_sub(local)
+    }
+    .unwrap_or_default();
+    let diff_bps_vs_exact = if exact_amount_out.is_zero() {
+        None
+    } else {
+        Some(((u256_to_f64(&local) / u256_to_f64(&exact_amount_out)) - 1.0) * 10_000.0)
+    };
+
+    json!({
+        "local_amount_out_raw": local.to_string(),
+        "exact_amount_out_raw": exact_amount_out.to_string(),
+        "signed_raw_diff_local_minus_exact": signed_raw_diff,
+        "abs_raw_diff": abs_raw_diff.to_string(),
+        "diff_bps_vs_exact": diff_bps_vs_exact,
+    })
 }
 
 fn route_bootstrap_config(

@@ -4,7 +4,7 @@ use anyhow::{Context, Result};
 use ethers::{
     abi::{Abi, AbiParser},
     contract::Contract,
-    types::{Address, U256},
+    types::{Address, BlockId, BlockNumber, U256},
 };
 
 use crate::{graph::TrianglePath, path::encode_triangle_path, state::RpcProvider};
@@ -36,14 +36,40 @@ impl QuoteEngine {
         triangle: &TrianglePath,
         amount_in: U256,
     ) -> Result<ExactQuoteResult> {
+        self.quote_triangle_amount_inner(triangle, amount_in, None)
+            .await
+    }
+
+    pub async fn quote_triangle_amount_at_block(
+        &self,
+        triangle: &TrianglePath,
+        amount_in: U256,
+        block_number: u64,
+    ) -> Result<ExactQuoteResult> {
+        self.quote_triangle_amount_inner(
+            triangle,
+            amount_in,
+            Some(BlockId::Number(BlockNumber::Number(block_number.into()))),
+        )
+        .await
+    }
+
+    async fn quote_triangle_amount_inner(
+        &self,
+        triangle: &TrianglePath,
+        amount_in: U256,
+        block_id: Option<BlockId>,
+    ) -> Result<ExactQuoteResult> {
         let path = encode_triangle_path(triangle);
 
-        let (amount_out, _, _, gas_estimate): (U256, Vec<U256>, Vec<u32>, U256) = self
+        let mut call = self
             .contract
-            .method::<_, (U256, Vec<U256>, Vec<u32>, U256)>("quoteExactInput", (path, amount_in))?
-            .call()
-            .await
-            .context("quoteExactInput failed")?;
+            .method::<_, (U256, Vec<U256>, Vec<u32>, U256)>("quoteExactInput", (path, amount_in))?;
+        if let Some(block_id) = block_id {
+            call = call.block(block_id);
+        }
+        let (amount_out, _, _, gas_estimate): (U256, Vec<U256>, Vec<u32>, U256) =
+            call.call().await.context("quoteExactInput failed")?;
 
         Ok(ExactQuoteResult {
             amount_in,
