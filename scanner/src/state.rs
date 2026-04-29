@@ -1,6 +1,8 @@
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap},
+    env,
     sync::Arc,
+    time::Duration,
 };
 
 use anyhow::{Context, Result, bail};
@@ -10,11 +12,14 @@ use ethers::{
     providers::{Http, Provider},
     types::{Address, U256},
 };
+use futures_util::{StreamExt, stream};
+use tokio::time::sleep;
+use tracing::info;
 
 use crate::config::{PoolDef, ScannerConfig, TokenDef};
 
 pub type RpcProvider = Provider<Http>;
-const TICK_BITMAP_WORD_SCAN_RADIUS: i32 = 12;
+const DEFAULT_TICK_BITMAP_WORD_SCAN_RADIUS: i32 = 12;
 
 #[derive(Clone, Debug)]
 pub struct SwapStateUpdate {
@@ -279,6 +284,7 @@ async fn load_dynamic_pool_state(
     tick_spacing: i32,
     at_block: u64,
 ) -> Result<PoolState> {
+    info!(pool = pool.name, address = ?pool.address, "loading pool dynamic state");
     let liquidity: u128 = contract
         .method::<_, u128>("liquidity", ())?
         .call()
@@ -289,11 +295,24 @@ async fn load_dynamic_pool_state(
         .call()
         .await
         .with_context(|| format!("slot0() failed for {}", pool.name))?;
+    info!(
+        pool = pool.name,
+        tick,
+        liquidity = liquidity.to_string(),
+        "loading initialized ticks"
+    );
     let initialized_ticks = load_initialized_ticks(&contract, tick, tick_spacing)
         .await
         .with_context(|| format!("failed to load initialized ticks for {}", pool.name))?;
     let (nearest_initialized_lower_tick, nearest_initialized_upper_tick) =
         initialized_tick_bounds(&initialized_ticks, tick);
+    info!(
+        pool = pool.name,
+        initialized_ticks = initialized_ticks.len(),
+        nearest_initialized_lower_tick,
+        nearest_initialized_upper_tick,
+        "loaded pool state"
+    );
 
     Ok(PoolState {
         pool,
@@ -336,14 +355,24 @@ async fn load_initialized_ticks(
     let spacing = tick_spacing.max(1);
     let compressed = tick.div_euclid(spacing);
     let current_word = compressed >> 8;
+    let scan_radius = tick_bitmap_word_scan_radius();
     let mut words = BTreeSet::new();
 
-    for distance in 0..=TICK_BITMAP_WORD_SCAN_RADIUS {
+    for distance in 0..=scan_radius {
         words.insert(current_word - distance);
         words.insert(current_word + distance);
     }
 
     let mut initialized_ticks = BTreeMap::new();
+    info!(
+        tick,
+        tick_spacing = spacing,
+        current_word,
+        scan_radius,
+        bitmap_words = words.len(),
+        "scanning tick bitmap words"
+    );
+    let mut initialized_tick_indexes = Vec::new();
 
     for word in words {
         let bitmap: U256 = contract
@@ -357,6 +386,48 @@ async fn load_initialized_ticks(
             }
 
             let tick = ((word << 8) + bit as i32) * spacing;
+            initialized_tick_indexes.push(tick);
+        }
+    }
+
+    let tick_load_concurrency = tick_load_concurrency();
+    info!(
+        initialized_tick_indexes = initialized_tick_indexes.len(),
+        tick_load_concurrency, "loading initialized tick details"
+    );
+
+    let loaded_ticks = stream::iter(initialized_tick_indexes)
+        .map(|tick| {
+            let contract = contract.clone();
+            async move {
+                load_tick_detail_with_retry(contract, tick)
+                    .await
+                    .map(|(liquidity_net, initialized)| (tick, liquidity_net, initialized))
+            }
+        })
+        .buffer_unordered(tick_load_concurrency)
+        .collect::<Vec<_>>()
+        .await;
+
+    for loaded in loaded_ticks {
+        let (tick, liquidity_net, initialized) = loaded?;
+        if initialized && liquidity_net != 0 {
+            initialized_ticks.insert(tick, liquidity_net);
+        }
+    }
+
+    Ok(initialized_ticks)
+}
+
+async fn load_tick_detail_with_retry(
+    contract: Contract<RpcProvider>,
+    tick: i32,
+) -> Result<(i128, bool)> {
+    let max_attempts = tick_load_retry_attempts();
+    let retry_delay = tick_load_retry_delay();
+
+    for attempt in 1..=max_attempts {
+        let result = async {
             let (_, liquidity_net, _, _, _, _, _, initialized): (
                 u128,
                 i128,
@@ -367,14 +438,65 @@ async fn load_initialized_ticks(
                 u32,
                 bool,
             ) = contract.method::<_, _>("ticks", tick)?.call().await?;
+            Ok::<_, anyhow::Error>((liquidity_net, initialized))
+        }
+        .await;
 
-            if initialized && liquidity_net != 0 {
-                initialized_ticks.insert(tick, liquidity_net);
+        match result {
+            Ok(detail) => return Ok(detail),
+            Err(error) if attempt < max_attempts && is_retryable_rpc_error(&error) => {
+                sleep(retry_delay.saturating_mul(attempt)).await;
             }
+            Err(error) => return Err(error),
         }
     }
 
-    Ok(initialized_ticks)
+    unreachable!("tick retry loop always returns")
+}
+
+fn is_retryable_rpc_error(error: &anyhow::Error) -> bool {
+    let message = error.to_string();
+    message.contains("429")
+        || message.contains("Too Many Requests")
+        || message.contains("exceeded")
+        || message.contains("rate limit")
+        || message.contains("EOF while parsing")
+        || message.contains("Deserialization Error")
+        || message.contains("connection")
+        || message.contains("timeout")
+}
+
+fn tick_bitmap_word_scan_radius() -> i32 {
+    env::var("SCANNER_TICK_BITMAP_WORD_SCAN_RADIUS")
+        .ok()
+        .and_then(|value| value.trim().parse::<i32>().ok())
+        .filter(|value| *value >= 0)
+        .unwrap_or(DEFAULT_TICK_BITMAP_WORD_SCAN_RADIUS)
+}
+
+fn tick_load_concurrency() -> usize {
+    env::var("SCANNER_TICK_LOAD_CONCURRENCY")
+        .ok()
+        .and_then(|value| value.trim().parse::<usize>().ok())
+        .filter(|value| *value > 0)
+        .unwrap_or(4)
+}
+
+fn tick_load_retry_attempts() -> u32 {
+    env::var("SCANNER_TICK_LOAD_RETRY_ATTEMPTS")
+        .ok()
+        .and_then(|value| value.trim().parse::<u32>().ok())
+        .filter(|value| *value > 0)
+        .unwrap_or(5)
+}
+
+fn tick_load_retry_delay() -> Duration {
+    let millis = env::var("SCANNER_TICK_LOAD_RETRY_MS")
+        .ok()
+        .and_then(|value| value.trim().parse::<u64>().ok())
+        .filter(|value| *value > 0)
+        .unwrap_or(500);
+    Duration::from_millis(millis)
 }
 
 fn initialized_tick_bounds(
